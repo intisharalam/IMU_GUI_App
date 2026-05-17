@@ -7,7 +7,7 @@ Shows three columns, one per IMU sensor (WRIST, ARM, CHEST).
 Each column has:
   - A status card: connected indicator, packet count, address, sync offset
   - Haptic and Sync buttons
-  - A scrolling plot: raw Roll, Pitch, Yaw over the last 10 seconds
+  - A scrolling plot: raw Roll, Pitch, Yaw — Y axis fixed -180 to +180 deg
 
 This panel only DISPLAYS data — it never writes to AppState.
 Button callbacks fire commands back through the BLE manager.
@@ -19,19 +19,21 @@ import dearpygui.dearpygui as dpg
 from ble.ble_state import AppState, SLOT_NAMES
 
 
-# ── Colours ──────────────────────────────────────────────────────────────────
-C_TEXT    = (210, 220, 230, 255)
-C_DIM     = (90,  105, 120, 255)
-C_GREEN   = (50,  220, 120, 255)
-C_RED     = (220,  70,  70, 255)
-C_AMBER   = (240, 180,  40, 255)
-C_ACCENT  = (70,  160, 255, 255)
-C_PANEL   = (22,  28,  36, 255)
-C_ROLL    = (70,  160, 255, 255)
-C_PITCH   = (50,  220, 120, 255)
-C_YAW     = (240, 180,  40, 255)
+# ── AMOLED Colours ────────────────────────────────────────────────────────────
+C_TEXT   = (240, 240, 240, 255)
+C_DIM    = (110, 110, 130, 255)
+C_GREEN  = (0,   255, 160, 255)
+C_RED    = (255,  60,  60, 255)
+C_AMBER  = (255, 200,   0, 255)
+C_ACCENT = (0,   180, 255, 255)
+C_PANEL  = (10,   10,  10, 255)
 
-PLOT_WINDOW_S = 10.0   # seconds of history shown in plot
+# Plot line colours — vivid, distinct on black
+C_ROLL   = (0,   180, 255, 255)   # cyan-blue
+C_PITCH  = (0,   255, 160, 255)   # mint green
+C_YAW    = (255, 200,   0, 255)   # amber
+
+PLOT_WINDOW_S = 10.0   # seconds of history shown
 
 
 class IMUPanel:
@@ -46,18 +48,10 @@ class IMUPanel:
     def __init__(self, state: AppState, ble_manager):
         self._state = state
         self._ble   = ble_manager
-
-        # Stores DearPyGui tag references for each sensor column
-        # so update() knows which widgets to change
-        self._tags = {}   # {"wrist": {...}, "arm": {...}, "chest": {...}}
+        self._tags  = {}
 
     def build(self, x: int, y: int, width: int, height: int):
-        """
-        Creates all widgets for the IMU status panel.
-        x, y: top-left corner position
-        width, height: total size of this panel
-        """
-        col_width = width // 3
+        col_width  = width // 3
         col_labels = {"wrist": "WRIST", "arm": "ARM", "chest": "CHEST"}
 
         for i, name in enumerate(SLOT_NAMES):
@@ -67,10 +61,6 @@ class IMUPanel:
             )
 
     def update(self):
-        """
-        Refreshes all displayed values from AppState.
-        Called every frame by the render loop.
-        """
         now = time.monotonic()
 
         for name in SLOT_NAMES:
@@ -105,9 +95,7 @@ class IMUPanel:
             dpg.configure_item(tags["sync"], default_value=sync_str,
                                color=C_TEXT if sync_off else C_DIM)
 
-            # Haptic button flashes amber while the motor is running
-            # Swap between two pre-built themes (DearPyGui can't edit theme
-            # colour items directly at runtime, so we swap the whole theme)
+            # Haptic button flashes amber while motor is running
             if haptic_act:
                 dpg.bind_item_theme(tags["haptic_btn"], tags["haptic_theme_amber"])
             else:
@@ -115,16 +103,14 @@ class IMUPanel:
 
             # --- Scrolling plot ---
             if t_list:
-                # Only show the last PLOT_WINDOW_S seconds
-                cutoff = now - PLOT_WINDOW_S
-                # Find where the data starts being within our window
+                cutoff  = now - PLOT_WINDOW_S
                 start_i = 0
                 for i, t in enumerate(t_list):
                     if t >= cutoff:
                         start_i = i
                         break
 
-                xs = [t - now for t in t_list[start_i:]]  # seconds ago (negative)
+                xs = [t - now for t in t_list[start_i:]]
                 rs = r_list[start_i:]
                 ps = p_list[start_i:]
                 ys = y_list[start_i:]
@@ -139,58 +125,65 @@ class IMUPanel:
                 dpg.set_value(tags["yaw_series"],   [[], []])
                 dpg.set_axis_limits(tags["x_axis"], -PLOT_WINDOW_S, 0)
 
-    # ── Private: build one sensor column ────────────────────────────────────
+    # ── Private ───────────────────────────────────────────────────────────────
 
     def _build_column(self, name, label, x, y, width, height):
-        """
-        Builds one sensor column and returns a dict of widget tags.
-        """
-        tags = {}
-        CARD_H = 130
-        BTN_H  = 40
-        PLOT_H = height - CARD_H - BTN_H - 30
+        tags   = {}
+
+        # Heights sized to fit actual rendered content.
+        # DearPyGui adds ~16px internal padding per child_window regardless
+        # of theme settings — these values account for that.
+        CARD_H  = 130   # dot + label + status + addr + packets + sync + padding
+        BTN_H   = 34    # one row of buttons
+        GAP     = 4
+        PLOT_H  = height - CARD_H - BTN_H - GAP * 4
 
         # --- Status card ---
-        with dpg.child_window(pos=(x + 4, y + 4),
-                              width=width - 8, height=CARD_H, border=True):
+        with dpg.child_window(pos=(x + 4, y + GAP),
+                              width=width - 8, height=CARD_H,
+                              border=True, no_scrollbar=True,
+                              no_scroll_with_mouse=True):
             with dpg.group(horizontal=True):
-                # Coloured dot indicator
-                tags["dot"] = dpg.add_text("●", color=C_RED)
-                dpg.add_text(f" {label}", color=C_ACCENT)
+                tags["dot"] = dpg.add_text("*", color=C_RED)
+                dpg.add_text(f"  {label}", color=C_ACCENT)
 
-            tags["status"] = dpg.add_text("Searching...", color=C_RED)
-            tags["addr"]   = dpg.add_text("", color=C_DIM)
+            tags["status"]  = dpg.add_text("Searching...", color=C_RED)
+            tags["addr"]    = dpg.add_text("", color=C_DIM)
 
-            dpg.add_spacer(height=4)
+            dpg.add_spacer(height=2)
             with dpg.group(horizontal=True):
                 dpg.add_text("Packets:", color=C_DIM)
                 tags["packets"] = dpg.add_text("—", color=C_TEXT)
 
             with dpg.group(horizontal=True):
-                dpg.add_text("Sync offset:", color=C_DIM)
+                dpg.add_text("Sync:", color=C_DIM)
                 tags["sync"] = dpg.add_text("—", color=C_DIM)
 
         # --- Buttons ---
-        btn_y = y + CARD_H + 8
+        btn_y = y + GAP + CARD_H + GAP
         btn_w = (width - 16) // 2
 
         with dpg.child_window(pos=(x + 4, btn_y),
-                              width=width - 8, height=BTN_H, border=False):
+                              width=width - 8, height=BTN_H,
+                              border=False, no_scrollbar=True,
+                              no_scroll_with_mouse=True):
             with dpg.group(horizontal=True):
-                # Haptic button — two pre-built themes, swapped at runtime
+
                 haptic_theme_normal = dpg.add_theme()
-                with dpg.theme_component(dpg.mvButton, parent=haptic_theme_normal):
-                    dpg.add_theme_color(dpg.mvThemeCol_Button, (60, 70, 85, 200))
+                with dpg.theme_component(dpg.mvButton,
+                                         parent=haptic_theme_normal):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, (35, 35, 45, 220))
                 tags["haptic_theme_normal"] = haptic_theme_normal
 
                 haptic_theme_amber = dpg.add_theme()
-                with dpg.theme_component(dpg.mvButton, parent=haptic_theme_amber):
+                with dpg.theme_component(dpg.mvButton,
+                                         parent=haptic_theme_amber):
                     dpg.add_theme_color(dpg.mvThemeCol_Button, C_AMBER)
                 tags["haptic_theme_amber"] = haptic_theme_amber
 
                 hb = dpg.add_button(
                     label="Haptic",
-                    width=btn_w,
+                    width=btn_w, height=BTN_H - 4,
                     callback=lambda s, a, u: self._ble.send_haptic(u),
                     user_data=name
                 )
@@ -199,23 +192,26 @@ class IMUPanel:
 
                 dpg.add_spacer(width=4)
 
-                # Sync button
                 sb = dpg.add_button(
                     label="Sync",
-                    width=btn_w,
+                    width=btn_w, height=BTN_H - 4,
                     callback=lambda s, a, u: self._ble.send_sync(u),
                     user_data=name
                 )
                 tags["sync_btn"] = sb
 
         # --- Scrolling plot ---
-        plot_y = btn_y + BTN_H + 4
+        plot_y = btn_y + BTN_H + GAP
         with dpg.child_window(pos=(x + 4, plot_y),
-                              width=width - 8, height=PLOT_H, border=True):
+                              width=width - 8, height=PLOT_H,
+                              border=True, no_scrollbar=True,
+                              no_scroll_with_mouse=True):
 
             dpg.add_text(f"  {label} — Roll / Pitch / Yaw", color=C_DIM)
 
-            with dpg.plot(height=PLOT_H - 50, width=width - 24,
+            # Plot height = container minus title (~18px) minus legend (~18px)
+            # minus child_window internal padding (~16px)
+            with dpg.plot(height=PLOT_H - 52, width=width - 16,
                           no_title=True, no_mouse_pos=True):
 
                 dpg.add_plot_legend()
@@ -223,7 +219,8 @@ class IMUPanel:
                 tags["x_axis"] = dpg.add_plot_axis(
                     dpg.mvXAxis, label="", no_tick_labels=True)
 
-                with dpg.plot_axis(dpg.mvYAxis, label="deg"):
+                with dpg.plot_axis(dpg.mvYAxis, label="deg") as y_ax:
+                    tags["y_axis"] = y_ax
                     tags["roll_series"]  = dpg.add_line_series(
                         [], [], label="Roll")
                     tags["pitch_series"] = dpg.add_line_series(
@@ -231,13 +228,11 @@ class IMUPanel:
                     tags["yaw_series"]   = dpg.add_line_series(
                         [], [], label="Yaw")
 
-            # Colour legend
+                dpg.set_axis_limits(tags["y_axis"], -180.0, 180.0)
+
             with dpg.group(horizontal=True):
-                dpg.add_text("●", color=C_ROLL)
-                dpg.add_text(" Roll  ", color=C_DIM)
-                dpg.add_text("●", color=C_PITCH)
-                dpg.add_text(" Pitch  ", color=C_DIM)
-                dpg.add_text("●", color=C_YAW)
-                dpg.add_text(" Yaw", color=C_DIM)
+                dpg.add_text("R", color=C_ROLL);  dpg.add_text(" Roll   ", color=C_DIM)
+                dpg.add_text("P", color=C_PITCH); dpg.add_text(" Pitch  ", color=C_DIM)
+                dpg.add_text("Y", color=C_YAW);   dpg.add_text(" Yaw",     color=C_DIM)
 
         return tags
