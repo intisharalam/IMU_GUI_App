@@ -174,7 +174,7 @@ class JointAngles:
         elbow_rot    = corrected["arm"].inv()   * corrected["wrist"]
 
         # Step 4 — ISB Euler decompositions (only done here, not in renderer)
-        plane_elev, elevation, axial_rot = self._yxy_shoulder(shoulder_rot)
+        plane_elev, elevation, axial_rot = self._xzy_shoulder(shoulder_rot)
         elbow_flex                        = self._z_elbow(elbow_rot)
 
         in_sagittal = abs(plane_elev) < 45 or abs(plane_elev) > 135
@@ -197,9 +197,12 @@ class JointAngles:
 
     # ── ISB decompositions ────────────────────────────────────────────────────
 
-    def _yxy_shoulder(self, rot: Rotation):
+    def _xzy_shoulder(self, rot: Rotation):
         """
         Y-X-Y Euler decomposition for humerothoracic joint (Wu 2005, Fig 7).
+          angles[0] → plane of elevation  (0°=sagittal/flexion, 90°=frontal/abduction)
+          angles[1] → elevation angle     (how high the arm is raised, 0–180°)
+          angles[2] → axial rotation      (internal −, external +)
         Returns (plane_of_elevation, elevation_angle, axial_rotation) in degrees.
         """
         a = rot.as_euler("YXY", degrees=True)

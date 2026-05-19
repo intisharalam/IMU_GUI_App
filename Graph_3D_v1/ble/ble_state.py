@@ -11,6 +11,7 @@ Nothing in here does any maths — it just stores values safely.
 
 import threading
 import collections
+import numpy as np
 
 
 # How many data points to keep in the scrolling plot buffers.
@@ -82,12 +83,24 @@ class IMUSlot:
         return (self.quat_w, self.quat_x, self.quat_y, self.quat_z)
 
     def get_plot_data(self):
-        """Returns copies of the plot buffers as plain lists."""
+        """
+        Returns copies of the plot buffers as plain lists.
+
+        Roll, pitch and yaw are phase-unwrapped before returning so the
+        scrolling plots show smooth continuous signals instead of ±180°
+        discontinuities. np.unwrap works in radians, so we convert in/out.
+        """
+        def unwrap_deg(deg_deque):
+            lst = list(deg_deque)
+            if len(lst) < 2:
+                return lst
+            return np.degrees(np.unwrap(np.radians(lst))).tolist()
+
         return (
             list(self.times),
-            list(self.rolls),
-            list(self.pitches),
-            list(self.yaws),
+            unwrap_deg(self.rolls),
+            unwrap_deg(self.pitches),
+            unwrap_deg(self.yaws),
         )
 
 
