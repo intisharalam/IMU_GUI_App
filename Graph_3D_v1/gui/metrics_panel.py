@@ -97,7 +97,7 @@ class MetricsPanel:
                 )
                 dpg.add_spacer(width=8)
                 self._tags["cal_status"] = dpg.add_text(
-                    "Not calibrated — connect all sensors first",
+                    "Not calibrated: connect all sensors first",
                     color=C_AMBER
                 )
         cur_y += CAL_H + GAP
@@ -136,12 +136,23 @@ class MetricsPanel:
                     self._tags["angle_y_axis"] = y_ax
                     self._tags["flex_series"]  = dpg.add_line_series(
                         [], [], label="Flexion")
+                    dpg.bind_item_theme(self._tags["flex_series"],
+                                        self._make_series_theme(C_FLEX))
+
                     self._tags["abd_series"]   = dpg.add_line_series(
                         [], [], label="Abduction")
+                    dpg.bind_item_theme(self._tags["abd_series"],
+                                        self._make_series_theme(C_ABD))
+
                     self._tags["rot_series"]   = dpg.add_line_series(
                         [], [], label="Ext. Rotation")
+                    dpg.bind_item_theme(self._tags["rot_series"],
+                                        self._make_series_theme(C_ROT))
+
                     self._tags["elbow_series"] = dpg.add_line_series(
                         [], [], label="Elbow")
+                    dpg.bind_item_theme(self._tags["elbow_series"],
+                                        self._make_series_theme(C_ELBOW))
 
                 dpg.set_axis_limits(self._tags["angle_y_axis"], -180.0, 180.0)
 
@@ -182,7 +193,12 @@ class MetricsPanel:
             elbow_hist = list(self._state.elbow_hist)
 
         # --- Calibration status ---
-        if calibrated:
+        capturing = self._calibration.is_capturing()
+        if capturing:
+            dpg.configure_item(self._tags["cal_status"],
+                               default_value="Capturing 3-sec average — hold I-pose...",
+                               color=C_ACCENT)
+        elif calibrated:
             dpg.configure_item(self._tags["cal_status"],
                                default_value="✓ Calibrated", color=C_GREEN)
         else:
@@ -265,6 +281,18 @@ class MetricsPanel:
                         f"[!] {adl_name} (>={threshold:.0f}deg)   ",
                         color=C_RED
                     )
+
+    def _make_series_theme(self, colour):
+        """
+        Creates and returns a DearPyGui theme that sets a plot line series
+        to the given RGBA colour tuple. Both the line and the legend swatch
+        are set so they always match.
+        """
+        with dpg.theme() as t:
+            with dpg.theme_component(dpg.mvLineSeries):
+                dpg.add_theme_color(dpg.mvPlotCol_Line, colour,
+                                    category=dpg.mvThemeCat_Plots)
+        return t
 
     def _on_calibrate(self):
         success = self._calibration.capture()
