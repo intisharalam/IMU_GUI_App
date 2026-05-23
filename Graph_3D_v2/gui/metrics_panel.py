@@ -1,285 +1,150 @@
 """
-gui/metrics_panel.py
---------------------
-Right panel — clinical metrics, joint angle plot, session stats.
-
-Sections (top to bottom):
-  1. Four max-angle cards (flexion, abduction, ext rot, elbow)
-  2. Scrolling joint angle plot (PyQtGraph, 10 s window)
-  3. Session stats: rep count, session timer, current exercise
-  4. ADL milestone indicators
-  5. Haptic event indicators (on rep complete / ROM limit / deviation)
-
-Only READS from AppState. Calibration status from Calibration object.
+gui/metrics_panel.py  —  v4.1
+------------------------------
+Clinical metrics plot + ADL milestones. Light theme throughout.
 """
 
 import time
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QFrame, QGridLayout, QSizePolicy, QProgressBar
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
-
 from ble.ble_state import AppState
 
-# ── Colours ───────────────────────────────────────────────────────────────────
-BG       = "#000000"
-PANEL_BG = "#0a0a0a"
-BORDER   = "#232330"
-TEXT     = "#f0f0f0"
-DIM      = "#6e6e82"
-C_GREEN  = "#00ffa0"
-C_RED    = "#ff3c3c"
-C_AMBER  = "#ffc800"
-C_ACCENT = "#00b4ff"
-C_PURPLE = "#b450ff"
+# Light theme colours
+BG      = "#f5f5f8"
+BORDER  = "#d0d0da"
+DIM     = "#666677"
+TEXT    = "#1a1a2a"
+C_GREEN = "#007744"
+C_RED   = "#cc2222"
+C_AMBER = "#cc8800"
+C_BLUE  = "#1a6aaa"
+C_PURPLE= "#7722aa"
 
-C_FLEX   = "#00b4ff"
-C_ABD    = "#00ffa0"
-C_ROT    = "#ffc800"
-C_ELBOW  = "#b450ff"
+C_FLEX  = "#1a6aaa"
+C_ABD   = "#007744"
+C_ROT   = "#cc8800"
+C_ELBOW = "#7722aa"
 
 PLOT_WINDOW_S = 10.0
 
 ADL_THRESHOLDS = {
-    "Touch head":      ("max_flexion",   130.0),
-    "Reach overhead":  ("max_abduction", 150.0),
-    "Put on coat":     ("max_ext_rot",    60.0),
+    "Touch head":     ("max_flexion",   130.0),
+    "Reach overhead": ("max_abduction", 150.0),
+    "Put on coat":    ("max_ext_rot",    60.0),
 }
 
 
-def _card(title: str, colour: str):
-    """Returns (frame, now_label, max_label) for an angle readout card."""
-    frame = QFrame()
-    frame.setStyleSheet(
-        f"QFrame {{ background: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px; }}"
-    )
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(8, 6, 8, 6)
-    layout.setSpacing(2)
-
-    title_lbl = QLabel(title)
-    title_lbl.setStyleSheet(f"color: {colour}; font-size: 11px; font-weight: bold;")
-
-    now_row = QHBoxLayout()
-    now_key = QLabel("Now:")
-    now_key.setStyleSheet(f"color: {DIM}; font-size: 11px;")
-    now_val = QLabel("—°")
-    now_val.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: bold;")
-    now_row.addWidget(now_key)
-    now_row.addWidget(now_val)
-    now_row.addStretch()
-
-    max_row = QHBoxLayout()
-    max_key = QLabel("Max:")
-    max_key.setStyleSheet(f"color: {DIM}; font-size: 11px;")
-    max_val = QLabel("—°")
-    max_val.setStyleSheet(f"color: {colour}; font-size: 13px; font-weight: bold;")
-    max_row.addWidget(max_key)
-    max_row.addWidget(max_val)
-    max_row.addStretch()
-
-    layout.addWidget(title_lbl)
-    layout.addLayout(now_row)
-    layout.addLayout(max_row)
-    return frame, now_val, max_val
-
-
 class MetricsPanel(QWidget):
-    """Right panel — all clinical metrics."""
-
     def __init__(self, state: AppState, calibration, parent=None):
         super().__init__(parent)
-        self._state       = state
-        self._calibration = calibration
-        self._session_start = time.monotonic()
+        self._state = state
+        self._cal   = calibration
         self._build()
 
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 0, 4, 4)
-        layout.setSpacing(6)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
 
-        # Header
         hdr = QLabel("CLINICAL METRICS")
         hdr.setStyleSheet(
-            f"color: {C_ACCENT}; font-size: 11px; font-weight: bold; padding: 4px 4px 2px 4px;"
+            f"color:{C_BLUE}; font-size:11px; font-weight:bold; padding:2px 0;"
         )
-        layout.addWidget(hdr)
+        lay.addWidget(hdr)
 
-        # ── Angle cards ───────────────────────────────────────────────────────
-        cards_widget = QWidget()
-        cards_layout = QHBoxLayout(cards_widget)
-        cards_layout.setContentsMargins(0, 0, 0, 0)
-        cards_layout.setSpacing(4)
-
-        self._card_flex,  self._flex_now,  self._flex_max  = _card("Shldr Flex",  C_FLEX)
-        self._card_abd,   self._abd_now,   self._abd_max   = _card("Abduction",   C_ABD)
-        self._card_rot,   self._rot_now,   self._rot_max   = _card("Ext. Rot",    C_ROT)
-        self._card_elbow, self._elbow_now, self._elbow_max = _card("Elbow Flex",  C_ELBOW)
-
-        for card in [self._card_flex, self._card_abd, self._card_rot, self._card_elbow]:
-            cards_layout.addWidget(card)
-        layout.addWidget(cards_widget)
-
-        # ── Calibration status ────────────────────────────────────────────────
         self._cal_lbl = QLabel("Not calibrated — connect all sensors first")
-        self._cal_lbl.setStyleSheet(f"color: {C_AMBER}; font-size: 11px; padding: 2px 4px;")
-        layout.addWidget(self._cal_lbl)
+        self._cal_lbl.setStyleSheet(f"color:{C_AMBER}; font-size:10px;")
+        lay.addWidget(self._cal_lbl)
 
-        # ── Joint angle scrolling plot ────────────────────────────────────────
-        self._plot = pg.PlotWidget(background=PANEL_BG)
-        self._plot.setLabel("left", "deg")
-        self._plot.showGrid(x=False, y=True, alpha=0.15)
+        # Scrolling angle plot — white background, dark axes
+        self._plot = pg.PlotWidget(background="w")
+        self._plot.getAxis("left").setTextPen("k")
+        self._plot.getAxis("bottom").setTextPen("k")
+        self._plot.getAxis("left").setPen("k")
+        self._plot.getAxis("bottom").setPen("k")
+        self._plot.showGrid(x=False, y=True, alpha=0.20)
         self._plot.setYRange(-180, 180)
         self._plot.setXRange(-PLOT_WINDOW_S, 0)
         self._plot.getAxis("bottom").setStyle(showValues=False)
         self._plot.setMouseEnabled(x=False, y=False)
         self._plot.hideButtons()
         self._plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._flex_c  = self._plot.plot(pen=pg.mkPen(C_FLEX,   width=1.5))
+        self._abd_c   = self._plot.plot(pen=pg.mkPen(C_ABD,    width=1.5))
+        self._rot_c   = self._plot.plot(pen=pg.mkPen(C_ROT,    width=1.5))
+        self._elbow_c = self._plot.plot(pen=pg.mkPen(C_PURPLE, width=1.5))
+        lay.addWidget(self._plot, stretch=1)
 
-        self._flex_curve  = self._plot.plot(pen=pg.mkPen(C_FLEX,   width=1.5), name="Flexion")
-        self._abd_curve   = self._plot.plot(pen=pg.mkPen(C_ABD,    width=1.5), name="Abduction")
-        self._rot_curve   = self._plot.plot(pen=pg.mkPen(C_ROT,    width=1.5), name="Ext Rot")
-        self._elbow_curve = self._plot.plot(pen=pg.mkPen(C_PURPLE, width=1.5), name="Elbow")
-        layout.addWidget(self._plot, stretch=1)
-
-        # Legend row
+        # Legend
         leg = QHBoxLayout()
-        for colour, label in [
-            (C_FLEX, "Flexion"), (C_ABD, "Abduction"),
-            (C_ROT, "Ext Rot"),  (C_ELBOW, "Elbow")
-        ]:
-            dot = QLabel("■")
-            dot.setStyleSheet(f"color: {colour}; font-size: 10px;")
-            t = QLabel(label + "  ")
-            t.setStyleSheet(f"color: {DIM}; font-size: 10px;")
-            leg.addWidget(dot); leg.addWidget(t)
+        for col, txt in [(C_FLEX,"Flex"),(C_ABD,"Abd"),(C_ROT,"Ext Rot"),(C_ELBOW,"Elbow")]:
+            d = QLabel("■"); d.setStyleSheet(f"color:{col}; font-size:10px;")
+            t = QLabel(txt + "  "); t.setStyleSheet(f"color:{DIM}; font-size:10px;")
+            leg.addWidget(d); leg.addWidget(t)
         leg.addStretch()
-        layout.addLayout(leg)
+        lay.addLayout(leg)
 
-        # ── Session stats row ─────────────────────────────────────────────────
-        stats = QHBoxLayout()
-        stats.setSpacing(4)
-
-        self._reps_card    = self._stat_card("Reps",    "0",         TEXT)
-        self._time_card    = self._stat_card("Time",    "00:00",     TEXT)
-        self._exname_card  = self._stat_card("Exercise","—",         C_ACCENT)
-
-        for w in [self._reps_card[0], self._time_card[0], self._exname_card[0]]:
-            stats.addWidget(w)
-        layout.addLayout(stats)
-
-        # ── ADL milestones ────────────────────────────────────────────────────
-        adl_frame = QFrame()
-        adl_frame.setStyleSheet(
-            f"QFrame {{ background: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px; }}"
+        # ADL milestones — light frame
+        adl = QFrame()
+        adl.setStyleSheet(
+            f"QFrame{{background:{BG};border:1px solid {BORDER};border-radius:4px;}}"
         )
-        adl_layout = QVBoxLayout(adl_frame)
-        adl_layout.setContentsMargins(8, 6, 8, 6)
-        adl_layout.setSpacing(3)
-
-        adl_hdr = QLabel("ADL Milestones (session best)")
-        adl_hdr.setStyleSheet(f"color: {DIM}; font-size: 10px;")
-        adl_layout.addWidget(adl_hdr)
-
-        adl_row = QHBoxLayout()
-        self._adl_labels = {}
-        for name, (_, threshold) in ADL_THRESHOLDS.items():
-            lbl = QLabel(f"[!] {name} (≥{threshold:.0f}°)")
-            lbl.setStyleSheet(f"color: {C_RED}; font-size: 10px;")
-            adl_row.addWidget(lbl)
-            self._adl_labels[name] = lbl
-        adl_row.addStretch()
-        adl_layout.addLayout(adl_row)
-        layout.addWidget(adl_frame)
-
-    # ── Stat card helper ──────────────────────────────────────────────────────
-
-    def _stat_card(self, title: str, value: str, colour: str):
-        frame = QFrame()
-        frame.setStyleSheet(
-            f"QFrame {{ background: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 4px; }}"
-        )
-        v = QVBoxLayout(frame)
-        v.setContentsMargins(8, 6, 8, 6)
-        v.setSpacing(2)
-        t = QLabel(title)
-        t.setStyleSheet(f"color: {DIM}; font-size: 10px;")
-        val = QLabel(value)
-        val.setStyleSheet(f"color: {colour}; font-size: 16px; font-weight: bold;")
-        v.addWidget(t)
-        v.addWidget(val)
-        return frame, val   # (widget, value_label)
-
-    # ── Per-frame refresh ─────────────────────────────────────────────────────
+        al = QVBoxLayout(adl); al.setContentsMargins(8,4,8,4); al.setSpacing(2)
+        ah = QLabel("ADL Milestones (session best)")
+        ah.setStyleSheet(f"color:{DIM}; font-size:9px; font-weight:bold;")
+        al.addWidget(ah)
+        arow = QHBoxLayout()
+        self._adl = {}
+        for name, (_, thresh) in ADL_THRESHOLDS.items():
+            lbl = QLabel(f"[!] {name} (≥{thresh:.0f}°)")
+            lbl.setStyleSheet(f"color:{C_RED}; font-size:10px;")
+            arow.addWidget(lbl)
+            self._adl[name] = lbl
+        arow.addStretch()
+        al.addLayout(arow)
+        lay.addWidget(adl)
 
     def refresh(self):
         now = time.monotonic()
-
         with self._state.lock:
-            calibrated  = self._state.calibrated
-            flex        = self._state.shoulder_flexion
-            abd         = self._state.shoulder_abduction
-            ext_rot     = self._state.external_rotation
-            elbow       = self._state.elbow_flexion
-            max_flex    = self._state.max_flexion
-            max_abd     = self._state.max_abduction
-            max_rot     = self._state.max_ext_rot
-            max_elbow   = self._state.max_elbow
-            t_list      = list(self._state.angle_times)
-            flex_h      = list(self._state.flexion_hist)
-            abd_h       = list(self._state.abduction_hist)
-            rot_h       = list(self._state.ext_rot_hist)
-            elbow_h     = list(self._state.elbow_hist)
+            calibrated = self._state.calibrated
+            mf = self._state.max_flexion; ma = self._state.max_abduction
+            mr = self._state.max_ext_rot
+            t_list = list(self._state.angle_times)
+            fh = list(self._state.flexion_hist)
+            ah = list(self._state.abduction_hist)
+            rh = list(self._state.ext_rot_hist)
+            eh = list(self._state.elbow_hist)
 
-        # Calibration status
-        if calibrated:
+        cap = self._cal.is_capturing() if hasattr(self._cal, 'is_capturing') else False
+        if cap:
+            self._cal_lbl.setText("Capturing 3s — hold I-pose...")
+            self._cal_lbl.setStyleSheet(f"color:{C_BLUE}; font-size:10px;")
+        elif calibrated:
             self._cal_lbl.setText("✓ Calibrated")
-            self._cal_lbl.setStyleSheet(f"color: {C_GREEN}; font-size: 11px; padding: 2px 4px;")
+            self._cal_lbl.setStyleSheet(f"color:{C_GREEN}; font-size:10px;")
         else:
             self._cal_lbl.setText("Not calibrated — connect all sensors first")
-            self._cal_lbl.setStyleSheet(f"color: {C_AMBER}; font-size: 11px; padding: 2px 4px;")
+            self._cal_lbl.setStyleSheet(f"color:{C_AMBER}; font-size:10px;")
 
-        # Angle cards
-        self._flex_now.setText(f"{flex:+.1f}°")
-        self._abd_now.setText(f"{abd:+.1f}°")
-        self._rot_now.setText(f"{ext_rot:+.1f}°")
-        self._elbow_now.setText(f"{elbow:+.1f}°")
-        self._flex_max.setText(f"{max_flex:.1f}°")
-        self._abd_max.setText(f"{max_abd:.1f}°")
-        self._rot_max.setText(f"{max_rot:.1f}°")
-        self._elbow_max.setText(f"{max_elbow:.1f}°")
-
-        # Scrolling plot
         if t_list:
-            cutoff  = now - PLOT_WINDOW_S
-            start   = next((i for i, t in enumerate(t_list) if t >= cutoff), 0)
+            cutoff = now - PLOT_WINDOW_S
+            start  = next((i for i,t in enumerate(t_list) if t >= cutoff), 0)
             xs = [t - now for t in t_list[start:]]
-            self._flex_curve.setData(xs, flex_h[start:])
-            self._abd_curve.setData(xs, abd_h[start:])
-            self._rot_curve.setData(xs, rot_h[start:])
-            self._elbow_curve.setData(xs, elbow_h[start:])
+            self._flex_c.setData(xs, fh[start:])
+            self._abd_c.setData(xs, ah[start:])
+            self._rot_c.setData(xs, rh[start:])
+            self._elbow_c.setData(xs, eh[start:])
         else:
-            for curve in [self._flex_curve, self._abd_curve,
-                          self._rot_curve, self._elbow_curve]:
-                curve.setData([], [])
+            for c in [self._flex_c, self._abd_c, self._rot_c, self._elbow_c]:
+                c.setData([], [])
 
-        # Session timer
-        elapsed = int(now - self._session_start)
-        m, s = divmod(elapsed, 60)
-        self._time_card[1].setText(f"{m:02d}:{s:02d}")
-
-        # ADL milestones
-        adl_vals = {"max_flexion": max_flex, "max_abduction": max_abd, "max_ext_rot": max_rot}
-        for name, (key, threshold) in ADL_THRESHOLDS.items():
-            achieved = adl_vals[key] >= threshold
-            lbl = self._adl_labels[name]
-            if achieved:
-                lbl.setText(f"[✓] {name}")
-                lbl.setStyleSheet(f"color: {C_GREEN}; font-size: 10px;")
-            else:
-                lbl.setText(f"[!] {name} (≥{threshold:.0f}°)")
-                lbl.setStyleSheet(f"color: {C_RED}; font-size: 10px;")
+        adl_vals = {"max_flexion": mf, "max_abduction": ma, "max_ext_rot": mr}
+        for name, (key, thresh) in ADL_THRESHOLDS.items():
+            done = adl_vals[key] >= thresh
+            self._adl[name].setText(f"[✓] {name}" if done else f"[!] {name} (≥{thresh:.0f}°)")
+            self._adl[name].setStyleSheet(
+                f"color:{C_GREEN if done else C_RED}; font-size:10px;"
+            )

@@ -1,95 +1,76 @@
 """
-calibration.py
---------------
-Handles the neutral-pose (I-pose) calibration step.
-
-When the user clicks Calibrate:
-  1. We snapshot the current quaternion from each sensor.
-  2. These become the "reference" quaternions for the zero angle position.
-  3. All future joint angles are computed RELATIVE to these references.
-
-Why calibration is needed:
-  - Each sensor is strapped on at a slightly different rotation.
-  - Without calibration, even a perfectly still arm would show non-zero angles.
-  - After calibration, the I-pose reads 0° for all joints.
-
----------------------------------------------------------
-AppState structure (for reference):
------------------------------------------------------------
-state.lock                  -> threading.Lock - acquire before any read/write
-state.calibrated            -> bool - True once capture() has succeeded
-state.calibration_quats     -> dict - neutral-pose quaternion per sensor:
-                                {
-                                    "wrist": (w, x, y, z),
-                                    "arm":   (w, x, y, z),
-                                    "chest": (w, x, y, z),
-                                }
-state.slots["wrist"]        -> IMUSlot - live data for one sensor
-state.slots["arm"]          -> IMUSlot
-state.slots["chest"]        -> IMUSlot
-
-IMUSlot fields used here:
-    .connected                -> bool   - is the sensor currently connected?
-    .get_quaternion()         -> tuple  - latest (w, x, y, z) from the sensor
-----------------------------------------------------------
+calibration.py  —  v3
+---------------------
+3-second averaged calibration using the quaternion eigenvalue method.
+Supports unlimited recalibration. Non-blocking (background thread).
 """
 
+import time, threading, numpy as np
 from ble.ble_state import AppState, SLOT_NAMES
+
+CAL_WINDOW_S = 3.0
+
+def _average_quaternions(quats_wxyz: list) -> tuple:
+    if not quats_wxyz:
+        return (1.0, 0.0, 0.0, 0.0)
+    arr = np.array(quats_wxyz, dtype=float)
+    ref = arr[0]
+    for i in range(1, len(arr)):
+        if np.dot(arr[i], ref) < 0.0:
+            arr[i] = -arr[i]
+    M = arr.T @ arr
+    eigenvalues, eigenvectors = np.linalg.eigh(M)
+    avg = eigenvectors[:, np.argmax(eigenvalues)]
+    avg /= np.linalg.norm(avg)
+    if avg[0] < 0:
+        avg = -avg
+    return tuple(float(v) for v in avg)
 
 
 class Calibration:
-    """
-    Captures and stores the neutral-pose reference quaternions.
-
-    Usage:
-        cal = Calibration(state)
-        success = cal.capture()   # call when user clicks Calibrate
-        if success:
-            ref = cal.get_references()  # use in JointAngles
-    """
-
     def __init__(self, state: AppState):
-        self._state = state
+        self._state     = state
+        self._capturing = False
+        self._thread    = None
 
     def capture(self) -> bool:
-        """
-        Snapshots the current quaternion of all three sensors.
-        Returns True if all three were connected and calibration succeeded.
-        Returns False if any sensor was missing.
-        """
         with self._state.lock:
-            # Only calibrate if all sensors are live
             if not self._state.all_connected():
-                print("[CAL] Calibration failed — not all sensors connected.")
+                print("[CAL] Not all sensors connected.")
                 return False
-
-            # Grab the current quaternion from each sensor
-            refs = {}
-            for name in SLOT_NAMES:
-                refs[name] = self._state.slots[name].get_quaternion()
-
-            # Store in shared state
-            self._state.calibration_quats = refs
-            self._state.calibrated = True
-
-        print("[CAL] Calibration captured:")
-        for name, q in refs.items():
-            print(f"  {name}: w={q[0]:.4f} x={q[1]:.4f} y={q[2]:.4f} z={q[3]:.4f}")
-
+        if self._capturing:
+            print("[CAL] Already capturing.")
+            return False
+        self._capturing = True
+        self._thread = threading.Thread(target=self._run, daemon=True, name="CalThread")
+        self._thread.start()
         return True
 
-    def get_references(self) -> dict:
-        """
-        Returns the stored reference quaternions as a dict.
-        Example: {"wrist": (w, x, y, z), "arm": ..., "chest": ...}
-        Returns an empty dict if calibration hasn't been done yet.
-        """
+    def is_capturing(self) -> bool:
+        return self._capturing
 
-        # We are sending a copy to prevent read and write at the same time by BLE & GUI
+    def is_calibrated(self) -> bool:
+        with self._state.lock:
+            return self._state.calibrated
+
+    def get_references(self) -> dict:
         with self._state.lock:
             return dict(self._state.calibration_quats)
 
-    def is_calibrated(self) -> bool:
-        """Returns True if calibration has been completed."""
+    def _run(self):
+        print(f"[CAL] Capturing {CAL_WINDOW_S:.0f}s average — hold I-pose.")
+        buffers = {n: [] for n in SLOT_NAMES}
+        t_end = time.monotonic() + CAL_WINDOW_S
+        while time.monotonic() < t_end:
+            with self._state.lock:
+                for n in SLOT_NAMES:
+                    buffers[n].append(self._state.slots[n].get_quaternion())
+            time.sleep(0.02)
+        refs = {n: _average_quaternions(buffers[n]) for n in SLOT_NAMES}
         with self._state.lock:
-            return self._state.calibrated
+            self._state.calibration_quats = refs   # new dict → triggers recal detection
+            self._state.calibrated = True
+        self._capturing = False
+        print("[CAL] Done.")
+        for n, q in refs.items():
+            print(f"  {n}: w={q[0]:.4f} x={q[1]:.4f} y={q[2]:.4f} z={q[3]:.4f}")

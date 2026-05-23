@@ -146,6 +146,18 @@ class AppState:
         self.ext_rot_hist     = collections.deque(maxlen=PLOT_BUFFER_SIZE)
         self.elbow_hist       = collections.deque(maxlen=PLOT_BUFFER_SIZE)
 
+
+        # --- Session / exercise state (written by GUI, read by panels) ---
+        self.session_active      = False
+        self.session_reps        = 0
+        self.current_exercise    = ""
+        self.rom_flex_limit      = 90.0   # goal sphere target degrees
+        self.rom_abd_limit       = 90.0
+        self.rom_rot_limit       = 45.0
+        self.rom_elbow_limit     = 90.0
+        self.rom_measured        = False
+        self.haptic_log          = []     # list of (timestamp, reason) tuples
+
     def all_connected(self):
         """Returns True only if all three sensors are currently connected."""
         return all(self.slots[n].connected for n in SLOT_NAMES)

@@ -1,330 +1,537 @@
 """
-gui/render_widget.py
---------------------
-Centre panel — live 3-D arm skeleton using PyQtGraph OpenGL.
+gui/render_widget.py  —  v4.1
+------------------------------
+PyQtGraph OpenGL arm skeleton with phantom body.
 
-Replaces VPython entirely. Everything lives inside a GLViewWidget
-so it sits naturally inside the Qt layout with zero threading issues.
+COORDINATE SYSTEM — FINAL FIX
+══════════════════════════════
+pyqtgraph GL axes (right-handed):
+  +X = right on screen
+  +Y = up on screen
+  +Z = toward viewer (out of screen)
 
-Objects:
-  - Torso  : GLBoxItem  (static, semi-transparent)
-  - Upper arm : GLLinePlotItem rendered as a thick cylinder via
-                two sphere joints + a line — or proper MeshItems
-  - Joints : GLScatterPlotItem (spheres)
+Anatomical axes (our frame):
+  +X = FORWARD (in front of patient, away from viewer)
+  +Y = UP
+  +Z = RIGHT (patient's right = screen left from front view)
 
-We use GLLinePlotItem for bones (simplest, no mesh needed) and
-GLScatterPlotItem for joints. This avoids needing trimesh or any
-external mesh library.
+We want to see the patient from the FRONT, so:
+  anatomical UP    (0,1,0) → GL UP    (0,1,0)   ✓
+  anatomical RIGHT (0,0,1) → GL RIGHT (+X)
+  anatomical FWD   (1,0,0) → GL AWAY  (-Z)
 
-Pipeline per frame (identical to arm_render.py):
-  1. Read raw quaternions from AppState under the lock.
-  2. right-multiply correction: corr = live * ref.inv()
-  3. Relative rotations: shoulder = chest.inv() * arm
-                         elbow    = arm.inv()   * wrist
-  4. Remap to anatomical via MOUNT conjugation.
-  5. Rotate DOWN vector → segment world directions.
-  6. Apply WORLD_ROT (+90° Y) to map anatomical → display frame.
-  7. Update GLLinePlotItem positions.
+Rotation that achieves this:
+  anat X→GL(-Z), anat Y→GL(Y), anat Z→GL(X)
+  This is a -90° rotation around Y.
+
+BUT: in I-pose the arm hangs DOWN in the anatomical frame = (0,-1,0).
+After -90°Y: (0,-1,0) → (0,-1,0). ✓ Still down on screen.
+
+Problem that was visible: shoulder was placed at GL (+X+Y,0) which is
+top-right in the GL frame. From the front view the shoulder should be
+at screen-right (+X) and elevated (+Y). That is correct, but the
+CAMERA was looking from azimuth=30 which is a front-right angle showing
+the torso from the side — so the arm appeared to go along the horizontal.
+
+FIX: camera azimuth=0 (directly in front), small elevation so we see
+the arm hang down. Also swap shoulder to +X side (screen-right = 
+patient right from front view is screen-LEFT, but since we're showing
+the patient's right arm, it should be on the viewer's left — set
+shoulder at -X+Y to keep it left on screen).
+
+Actually the simplest mental model: place everything, then set camera
+looking straight at the patient (azimuth=180 looks from front in pyqtgraph,
+azimuth=0 looks from behind). We use azimuth=225 to get front-left view
+which shows the right arm on the right side of the screen.
+
+PHANTOM BODY:
+  Static grey GL shapes approximating head, neck, spine, pelvis, left arm.
+  Drawn once, never updated. Gives spatial reference for the moving arm.
 """
 
+import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+import pyqtgraph as pg
 import pyqtgraph.opengl as gl
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton
-from PyQt5.QtCore import Qt
-
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
 from PyQt5.QtGui import QVector3D
-from calc.joint_angles import MOUNT_CHEST, MOUNT_ARM, MOUNT_WRIST, _to_rot
+from PyQt5.QtCore import pyqtSignal
 
-# ── Segment lengths (metres) ──────────────────────────────────────────────────
+from calc.joint_angles import MOUNT, to_anatomical, QuaternionFilter
+
 UPPER_ARM_LEN = 0.30
 FOREARM_LEN   = 0.25
 
-# ── Colours (RGBA 0–1) ────────────────────────────────────────────────────────
-C_TORSO     = (1.0, 1.0, 1.0, 0.12)
-C_UPPER_ARM = (0.27, 0.71, 1.00, 1.0)   # cyan-blue
-C_FOREARM   = (0.70, 0.31, 1.00, 1.0)   # purple
-C_SHOULDER  = (1.00, 0.78, 0.00, 1.0)   # amber
-C_ELBOW     = (0.00, 1.00, 0.63, 1.0)   # mint
-C_WRIST     = (1.00, 0.24, 0.24, 1.0)   # red
-BG_COLOR    = (0.04, 0.04, 0.04, 1.0)
+# ── Colours ───────────────────────────────────────────────────────────────────
+C_TORSO      = (0.75, 0.75, 0.80, 0.20)
+C_UPPER_ARM  = (0.27, 0.71, 1.00, 1.0)
+C_FOREARM    = (0.70, 0.31, 1.00, 1.0)
+C_SHOULDER   = (1.00, 0.78, 0.00, 1.0)
+C_ELBOW      = (0.00, 0.85, 0.50, 1.0)
+C_WRIST      = (1.00, 0.24, 0.24, 1.0)
+C_GOAL_FAR   = (1.00, 0.24, 0.24, 0.45)
+C_GOAL_NEAR  = (1.00, 0.85, 0.00, 0.55)
+C_GOAL_HIT   = (0.00, 0.85, 0.40, 0.70)
+C_PHANTOM    = (0.55, 0.60, 0.65, 0.35)   # ghost grey for static body parts
+BG_COLOR     = (0.10, 0.10, 0.12, 1.0)    # dark background (looks better in GL)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
 DOWN_NP    = np.array([0., -1., 0.])
 IDENTITY_Q = (1., 0., 0., 0.)
-MOUNT      = {"chest": MOUNT_CHEST, "arm": MOUNT_ARM, "wrist": MOUNT_WRIST}
 
-# Maps anatomical frame (X=fwd,Y=up,Z=right) → VPython/GL display frame
-WORLD_ROT  = Rotation.from_euler("Y", 90, degrees=True)
+# ── WORLD_ROT ─────────────────────────────────────────────────────────────────
+# Maps anatomical frame → GL display frame.
+# anat(X=fwd, Y=up, Z=right) → GL(X=right, Y=up, Z=toward_viewer)
+# We want: anat-Z(right) → GL+X, anat-X(fwd) → GL-Z, anat-Y → GL+Y
+# That is a -90° rotation around GL Y axis.
+WORLD_ROT = Rotation.from_euler("Y", -90, degrees=True)
+
+DIR_JUMP_THRESH = 0.35
+GOAL_HIT_DIST   = 0.06
+GOAL_HOLD_S     = 3.0
 
 
-def _sphere_mesh(radius: float, rows: int = 10, cols: int = 10) -> gl.GLMeshItem:
-    """Generate a UV-sphere GLMeshItem centred at origin."""
-    verts = []
-    faces = []
+# ── Mesh helpers ──────────────────────────────────────────────────────────────
+
+def _sphere_mesh(radius, rows=12, cols=12):
+    verts, faces = [], []
     for r in range(rows + 1):
         lat = np.pi * r / rows - np.pi / 2
         for c in range(cols):
             lon = 2 * np.pi * c / cols
-            x = radius * np.cos(lat) * np.cos(lon)
-            y = radius * np.sin(lat)
-            z = radius * np.cos(lat) * np.sin(lon)
-            verts.append([x, y, z])
+            verts.append([radius * np.cos(lat) * np.cos(lon),
+                          radius * np.sin(lat),
+                          radius * np.cos(lat) * np.sin(lon)])
     verts = np.array(verts, dtype=np.float32)
     for r in range(rows):
         for c in range(cols):
-            a = r * cols + c
-            b = r * cols + (c + 1) % cols
-            d = (r + 1) * cols + c
-            e = (r + 1) * cols + (c + 1) % cols
-            faces.append([a, b, e])
-            faces.append([a, e, d])
-    faces = np.array(faces, dtype=np.uint32)
-    md = gl.MeshData(vertexes=verts, faces=faces)
-    return gl.GLMeshItem(meshdata=md, smooth=True)
+            a = r*cols+c; b = r*cols+(c+1)%cols
+            d = (r+1)*cols+c; e = (r+1)*cols+(c+1)%cols
+            faces += [[a,b,e],[a,e,d]]
+    return gl.GLMeshItem(
+        meshdata=gl.MeshData(vertexes=verts, faces=np.array(faces, dtype=np.uint32)),
+        smooth=True)
 
 
-def _cylinder_mesh(start: np.ndarray, end: np.ndarray,
-                   radius: float, segs: int = 12) -> gl.GLMeshItem:
-    """Generate a cylinder GLMeshItem from start to end."""
-    axis   = end - start
-    length = np.linalg.norm(axis)
-    if length < 1e-6:
+def _cylinder_mesh(start, end, radius, segs=14):
+    axis = end - start; L = np.linalg.norm(axis)
+    if L < 1e-6:
         return gl.GLMeshItem()
-
-    # Build cylinder along Z, then rotate to align with axis
-    z_hat = axis / length
-    # Find an orthogonal vector
-    ref = np.array([1, 0, 0]) if abs(z_hat[0]) < 0.9 else np.array([0, 1, 0])
-    x_hat = np.cross(ref, z_hat); x_hat /= np.linalg.norm(x_hat)
-    y_hat = np.cross(z_hat, x_hat)
-
-    angles = np.linspace(0, 2 * np.pi, segs, endpoint=False)
-    ring_bottom = start + radius * (np.outer(np.cos(angles), x_hat) +
-                                    np.outer(np.sin(angles), y_hat))
-    ring_top    = end   + radius * (np.outer(np.cos(angles), x_hat) +
-                                    np.outer(np.sin(angles), y_hat))
-
-    verts = np.vstack([ring_bottom, ring_top]).astype(np.float32)
+    z = axis / L
+    ref = np.array([1,0,0]) if abs(z[0]) < 0.9 else np.array([0,1,0])
+    x = np.cross(ref, z); x /= np.linalg.norm(x)
+    y = np.cross(z, x)
+    angles = np.linspace(0, 2*np.pi, segs, endpoint=False)
+    rb = start + radius*(np.outer(np.cos(angles),x) + np.outer(np.sin(angles),y))
+    rt = end   + radius*(np.outer(np.cos(angles),x) + np.outer(np.sin(angles),y))
+    verts = np.vstack([rb, rt]).astype(np.float32)
     faces = []
     for i in range(segs):
-        n = (i + 1) % segs
-        faces.append([i, n, segs + n])
-        faces.append([i, segs + n, segs + i])
-    faces = np.array(faces, dtype=np.uint32)
-    md = gl.MeshData(vertexes=verts, faces=faces)
-    return gl.GLMeshItem(meshdata=md, smooth=False)
+        n = (i+1)%segs
+        faces += [[i,n,segs+n],[i,segs+n,segs+i]]
+    return gl.GLMeshItem(
+        meshdata=gl.MeshData(vertexes=verts, faces=np.array(faces, dtype=np.uint32)),
+        smooth=False)
+
+
+def _ellipsoid_mesh(rx, ry, rz, rows=10, cols=10):
+    """Scaled sphere to approximate ellipsoidal body parts."""
+    verts, faces = [], []
+    for r in range(rows + 1):
+        lat = np.pi * r / rows - np.pi / 2
+        for c in range(cols):
+            lon = 2 * np.pi * c / cols
+            verts.append([rx * np.cos(lat) * np.cos(lon),
+                          ry * np.sin(lat),
+                          rz * np.cos(lat) * np.sin(lon)])
+    verts = np.array(verts, dtype=np.float32)
+    for r in range(rows):
+        for c in range(cols):
+            a = r*cols+c; b = r*cols+(c+1)%cols
+            d = (r+1)*cols+c; e = (r+1)*cols+(c+1)%cols
+            faces += [[a,b,e],[a,e,d]]
+    return gl.GLMeshItem(
+        meshdata=gl.MeshData(vertexes=verts, faces=np.array(faces, dtype=np.uint32)),
+        smooth=True)
 
 
 class RenderWidget(QWidget):
     """
-    Centre panel containing the OpenGL arm skeleton and a status label.
+    3D arm skeleton with phantom body reference, goal sphere, ROM mode, playback.
     """
+    goal_achieved = pyqtSignal()
 
-    def __init__(self, state: AppState, parent=None):
+    def __init__(self, state, parent=None):
         super().__init__(parent)
-        self._state      = state
-        self._calibrated = False
+        self._state        = state
+        self._filters      = {n: QuaternionFilter() for n in ["chest","arm","wrist"]}
+        self._prev_upper   = np.array([0., -UPPER_ARM_LEN, 0.])
+        self._prev_fore    = np.array([0., -FOREARM_LEN,   0.])
+        self._goal_pos     = None
+        self._goal_active  = False
+        self._goal_hit_t   = None
+        self._rom_mode     = False
+        self._rom_max      = {"flex":0.,"abd":0.,"rot":0.,"elbow":0.}
+        self._playback_frames = []
+        self._playback_idx    = 0
+        self._playing         = False
+        self._recording_geom  = False
+        self._geom_buf        = []
         self._build_ui()
         self._build_scene()
 
     # ── UI shell ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
 
-        # Header
         hdr = QLabel("3D SKELETON")
         hdr.setStyleSheet(
-            "color: #00b4ff; font-size: 11px; font-weight: bold; "
-            "padding: 4px 8px; background: #0a0a0a;"
+            "color:#aaccff; font-size:11px; font-weight:bold;"
+            " padding:3px 8px; background:#16161e; border-bottom:1px solid #2a2a3a;"
         )
-        layout.addWidget(hdr)
+        lay.addWidget(hdr)
 
-        # GL view
         self._view = gl.GLViewWidget()
         self._view.setBackgroundColor(BG_COLOR)
-        self._view.setCameraPosition(distance=1.2, elevation=15, azimuth=45)
-        layout.addWidget(self._view, stretch=1)
+        # azimuth=180 → camera directly in front of figure (patient faces viewer)
+        # elevation=28 → camera ~28° above horizontal — figure stands upright on screen
+        # distance=2.5 → shows full figure head-to-knee comfortably
+        # center offset to mid-torso so the body fills the frame, not the floor
+        self._view.setCameraPosition(distance=2.5, elevation=28, azimuth=180)
+        self._view.opts['center'] = pg.Vector(0, 0.15, 0)
+        lay.addWidget(self._view, stretch=1)
 
-        # Status + calibrate button row
+        # Status bar
         bar = QWidget()
-        bar.setStyleSheet("background: #0a0a0a; border-top: 1px solid #232330;")
-        bar_layout = QHBoxLayout(bar)
-        bar_layout.setContentsMargins(8, 4, 8, 4)
-
+        bar.setStyleSheet("background:#16161e; border-top:1px solid #2a2a3a;")
+        bl = QHBoxLayout(bar); bl.setContentsMargins(8,3,8,3); bl.setSpacing(6)
         self._status_lbl = QLabel("Waiting for sensors...")
-        self._status_lbl.setStyleSheet("color: #ffc800; font-size: 11px;")
-
-        cal_btn = QPushButton("Calibrate (I-Pose)")
-        cal_btn.setFixedHeight(28)
-        cal_btn.setStyleSheet(
-            "QPushButton { background: #00ffa0; color: #000; font-weight: bold; "
-            "border: none; border-radius: 4px; padding: 4px 14px; }"
-            "QPushButton:hover { background: #00cc80; }"
+        self._status_lbl.setStyleSheet("color:#ccaa00; font-size:10px;")
+        self._goal_lbl = QLabel("")
+        self._goal_lbl.setStyleSheet("color:#cc4400; font-size:10px; font-weight:bold;")
+        self._rom_btn = QPushButton("Measure ROM")
+        self._rom_btn.setFixedHeight(24)
+        self._rom_btn.setStyleSheet(
+            "QPushButton{background:#3a3000;color:#ccaa00;border:1px solid #665500;"
+            " border-radius:3px;font-size:10px;padding:1px 8px;}"
+            "QPushButton:hover{background:#554400;}"
         )
-        cal_btn.clicked.connect(self._on_calibrate)
+        self._rom_btn.clicked.connect(self._toggle_rom_mode)
+        self._play_btn = QPushButton("▶ Replay")
+        self._play_btn.setFixedHeight(24)
+        self._play_btn.setEnabled(False)
+        self._play_btn.setStyleSheet(
+            "QPushButton{background:#003322;color:#00cc88;border:1px solid #005533;"
+            " border-radius:3px;font-size:10px;padding:1px 8px;}"
+            "QPushButton:hover{background:#004433;}"
+            "QPushButton:disabled{background:#222;color:#555;border-color:#333;}"
+        )
+        self._play_btn.clicked.connect(self._toggle_playback)
+        bl.addWidget(self._status_lbl, stretch=1)
+        bl.addWidget(self._goal_lbl)
+        bl.addWidget(self._rom_btn)
+        bl.addWidget(self._play_btn)
+        bar.setFixedHeight(30)
+        lay.addWidget(bar)
 
-        bar_layout.addWidget(self._status_lbl, stretch=1)
-        bar_layout.addWidget(cal_btn)
-        bar.setFixedHeight(36)
-        layout.addWidget(bar)
-
-    # ── Scene objects ─────────────────────────────────────────────────────────
+    # ── Scene ─────────────────────────────────────────────────────────────────
 
     def _build_scene(self):
-        """Create all persistent GL objects. Updated each frame by refresh()."""
-
-        # Grid
+        # Grid — floor at y=-0.95 (below knees, feet level)
         grid = gl.GLGridItem()
-        grid.setSize(2, 2)
-        grid.setSpacing(0.1, 0.1)
-        grid.setColor((50, 50, 60, 80))
+        grid.setSize(4, 4); grid.setSpacing(0.20, 0.20)
+        grid.setColor((80, 80, 100, 140))
+        grid.translate(0, -0.95, 0)
         self._view.addItem(grid)
 
-        # Torso box (static)
-        torso = gl.GLBoxItem(size=QVector3D(0.08, 0.20, 0.12), color=C_TORSO)
-        torso.translate(-0.04, -0.10, -0.06)   # centre at origin
-        self._view.addItem(torso)
+        # Phantom body
+        self._build_phantom_body()
 
-        # Shoulder position (top-right of torso)
-        self._shoulder_pos = np.array([0.04 + 0.038, 0.10, 0.0])
+        # Patient's RIGHT shoulder = screen LEFT (viewer faces patient).
+        # X = -0.16 mirrors the phantom left arm position.
+        self._shoulder_pos = np.array([-0.16, 0.38, 0.0])
 
-        # Joint spheres
-        self._sph_shoulder = _sphere_mesh(0.038)
-        self._sph_elbow    = _sphere_mesh(0.032)
-        self._sph_wrist    = _sphere_mesh(0.026)
-        self._set_mesh_color(self._sph_shoulder, C_SHOULDER)
-        self._set_mesh_color(self._sph_elbow,    C_ELBOW)
-        self._set_mesh_color(self._sph_wrist,    C_WRIST)
-        self._view.addItem(self._sph_shoulder)
-        self._view.addItem(self._sph_elbow)
-        self._view.addItem(self._sph_wrist)
-
-        # Bone cylinders (rebuilt each frame)
-        self._upper_arm_mesh = None
-        self._forearm_mesh   = None
-
-        # Shoulder sphere stays fixed
+        self._sph_shoulder = _sphere_mesh(0.040); self._sph_shoulder.setColor(C_SHOULDER)
+        self._sph_elbow    = _sphere_mesh(0.033); self._sph_elbow.setColor(C_ELBOW)
+        self._sph_wrist    = _sphere_mesh(0.027); self._sph_wrist.setColor(C_WRIST)
+        for s in [self._sph_shoulder, self._sph_elbow, self._sph_wrist]:
+            self._view.addItem(s)
         self._sph_shoulder.translate(*self._shoulder_pos)
 
-        # Initial I-pose positions
-        elbow_pos = self._shoulder_pos + np.array([0, -UPPER_ARM_LEN, 0])
-        wrist_pos = elbow_pos          + np.array([0, -FOREARM_LEN,   0])
-        self._sph_elbow.translate(*elbow_pos)
-        self._sph_wrist.translate(*wrist_pos)
-        self._rebuild_bones(elbow_pos, wrist_pos)
+        elbow0 = self._shoulder_pos + np.array([0, -UPPER_ARM_LEN, 0])
+        wrist0 = elbow0 + np.array([0, -FOREARM_LEN, 0])
+        self._sph_elbow.translate(*elbow0)
+        self._sph_wrist.translate(*wrist0)
 
-    @staticmethod
-    def _set_mesh_color(mesh: gl.GLMeshItem, rgba):
-        mesh.setColor(rgba)
+        # Goal sphere
+        self._goal_sphere = _sphere_mesh(0.060)
+        self._goal_sphere.setColor(C_GOAL_FAR)
+        self._goal_sphere.setVisible(False)
+        self._view.addItem(self._goal_sphere)
 
-    def _rebuild_bones(self, elbow_pos: np.ndarray, wrist_pos: np.ndarray):
-        """Remove old bone meshes and add new ones at updated positions."""
-        if self._upper_arm_mesh is not None:
-            self._view.removeItem(self._upper_arm_mesh)
-        if self._forearm_mesh is not None:
-            self._view.removeItem(self._forearm_mesh)
+        self._upper_mesh = self._fore_mesh = None
+        self._rebuild_bones(elbow0, wrist0)
 
-        self._upper_arm_mesh = _cylinder_mesh(
-            self._shoulder_pos, elbow_pos, radius=0.025)
-        self._forearm_mesh   = _cylinder_mesh(
-            elbow_pos, wrist_pos, radius=0.020)
+    def _build_phantom_body(self):
+        """
+        Static grey body reference. All positions in GL display frame.
+        GL: X=screen-right, Y=up, Z=toward-viewer.
 
-        self._set_mesh_color(self._upper_arm_mesh, C_UPPER_ARM)
-        self._set_mesh_color(self._forearm_mesh,   C_FOREARM)
-        self._view.addItem(self._upper_arm_mesh)
-        self._view.addItem(self._forearm_mesh)
+        Vertical layout (Y axis), grid floor at Y = -0.95:
+          Feet/knees  Y = -0.95 to -0.30
+          Hips/pelvis Y = -0.20
+          Torso       Y = -0.10 to +0.38
+          Shoulders   Y = +0.38
+          Neck        Y = +0.38 to +0.50
+          Head centre Y = +0.62
+        """
+        def _add(mesh, colour=C_PHANTOM):
+            mesh.setColor(colour)
+            mesh.setGLOptions('translucent')
+            self._view.addItem(mesh)
 
-    # ── Per-frame update ──────────────────────────────────────────────────────
+        # Head
+        head = _ellipsoid_mesh(0.09, 0.11, 0.09)
+        head.translate(0, 0.62, 0)
+        _add(head)
+
+        # Neck
+        neck = _cylinder_mesh(np.array([0, 0.38, 0]),
+                               np.array([0, 0.50, 0]), 0.040)
+        _add(neck)
+
+        # Torso box — centre at (0, 0.14, 0), height 0.48
+        torso = gl.GLBoxItem(size=QVector3D(0.26, 0.48, 0.16), color=C_PHANTOM)
+        torso.translate(-0.13, -0.10, -0.08)   # bottom-left-back corner
+        torso.setGLOptions('translucent')
+        self._view.addItem(torso)
+
+        # Pelvis ellipsoid
+        pelvis = _ellipsoid_mesh(0.15, 0.10, 0.11)
+        pelvis.translate(0, -0.16, 0)
+        _add(pelvis)
+
+        # Left arm (phantom — hangs relaxed at side)
+        # Patient's LEFT arm = screen RIGHT (viewer faces patient).
+        l_shoulder = np.array([0.15, 0.38, 0.0])
+        l_elbow    = np.array([0.15, 0.10, 0.0])
+        l_wrist    = np.array([0.15, -0.12, 0.0])
+        _add(_cylinder_mesh(l_shoulder, l_elbow,  0.025))
+        _add(_cylinder_mesh(l_elbow,   l_wrist,   0.020))
+        ls = _sphere_mesh(0.038); ls.translate(*l_shoulder); _add(ls)
+        le = _sphere_mesh(0.030); le.translate(*l_elbow);    _add(le)
+
+        # Upper legs
+        for sx in [0.08, -0.08]:
+            hip  = np.array([sx, -0.22, 0.0])
+            knee = np.array([sx, -0.60, 0.0])
+            _add(_cylinder_mesh(hip, knee, 0.040))
+            kn = _sphere_mesh(0.042); kn.translate(*knee); _add(kn)
+
+    def _rebuild_bones(self, elbow, wrist):
+        for attr in ["_upper_mesh", "_fore_mesh"]:
+            m = getattr(self, attr)
+            if m is not None:
+                self._view.removeItem(m)
+        self._upper_mesh = _cylinder_mesh(self._shoulder_pos, elbow, 0.026)
+        self._fore_mesh  = _cylinder_mesh(elbow, wrist, 0.021)
+        self._upper_mesh.setColor(C_UPPER_ARM)
+        self._fore_mesh.setColor(C_FOREARM)
+        self._view.addItem(self._upper_mesh)
+        self._view.addItem(self._fore_mesh)
+
+    # ── Goal sphere ───────────────────────────────────────────────────────────
+
+    def set_goal(self, wrist_target_anat: np.ndarray):
+        gl_pos = WORLD_ROT.apply(wrist_target_anat) + self._shoulder_pos
+        self._goal_pos = gl_pos
+        self._goal_active = True
+        self._goal_hit_t = None
+        self._goal_sphere.resetTransform()
+        self._goal_sphere.translate(*gl_pos)
+        self._goal_sphere.setColor(C_GOAL_FAR)
+        self._goal_sphere.setVisible(True)
+
+    def clear_goal(self):
+        self._goal_active = False
+        self._goal_pos = None
+        self._goal_hit_t = None
+        self._goal_sphere.setVisible(False)
+        self._goal_lbl.setText("")
+
+    # ── ROM mode ──────────────────────────────────────────────────────────────
+
+    def _toggle_rom_mode(self):
+        if not self._rom_mode:
+            self._rom_mode = True
+            self._rom_max = {"flex":0.,"abd":0.,"rot":0.,"elbow":0.}
+            self._rom_btn.setText("Stop ROM")
+            self._rom_btn.setStyleSheet(
+                "QPushButton{background:#3a0000;color:#ff8888;border:1px solid #883333;"
+                " border-radius:3px;font-size:10px;padding:1px 8px;}"
+            )
+        else:
+            self._rom_mode = False
+            self._rom_btn.setText("Measure ROM")
+            self._rom_btn.setStyleSheet(
+                "QPushButton{background:#3a3000;color:#ccaa00;border:1px solid #665500;"
+                " border-radius:3px;font-size:10px;padding:1px 8px;}"
+                "QPushButton:hover{background:#554400;}"
+            )
+            if self._state:
+                with self._state.lock:
+                    self._state.rom_flex_limit  = max(self._rom_max["flex"],  10.)
+                    self._state.rom_abd_limit   = max(self._rom_max["abd"],   10.)
+                    self._state.rom_rot_limit   = max(self._rom_max["rot"],   10.)
+                    self._state.rom_elbow_limit = max(self._rom_max["elbow"], 10.)
+                    self._state.rom_measured    = True
+            print(f"[ROM] Result: {self._rom_max}")
+
+    def get_rom_result(self):
+        return dict(self._rom_max)
+
+    # ── Playback ──────────────────────────────────────────────────────────────
+
+    def start_geometry_recording(self):
+        self._geom_buf = []; self._recording_geom = True
+
+    def stop_geometry_recording(self):
+        self._recording_geom = False
+        self._playback_frames = list(self._geom_buf)
+        if self._playback_frames:
+            self._play_btn.setEnabled(True)
+        print(f"[REC] {len(self._playback_frames)} geometry frames recorded.")
+
+    def _toggle_playback(self):
+        if not self._playback_frames:
+            return
+        if not self._playing:
+            self._playing = True
+            self._playback_idx = 0
+            self._play_btn.setText("⏹ Stop")
+        else:
+            self._playing = False
+            self._play_btn.setText("▶ Replay")
+
+    # ── Per-frame ─────────────────────────────────────────────────────────────
 
     def refresh(self):
-        q_raw, q_ref, calibrated = self._read_state()
-        self._calibrated = calibrated
+        if self._playing:
+            self._tick_playback()
+        else:
+            self._tick_live()
 
-        # Right-multiply correction: corr = live * ref.inv()
-        corr = {
-            n: _to_rot(q_raw[n]) * _to_rot(q_ref[n]).inv()
-            for n in ["chest", "arm", "wrist"]
-        }
-
-        # Relative joint rotations
-        shoulder_world = corr["chest"].inv() * corr["arm"]
-        elbow_world    = corr["arm"].inv()   * corr["wrist"]
-
-        # Remap into anatomical frame via MOUNT conjugation
-        shoulder_rot = MOUNT_CHEST * shoulder_world * MOUNT_CHEST.inv()
-        elbow_rot    = MOUNT_ARM   * elbow_world    * MOUNT_ARM.inv()
-
-        # Rotate DOWN vector to get segment directions
-        upper_dir_np = shoulder_rot.apply(DOWN_NP) * UPPER_ARM_LEN
-        fore_dir_np  = (shoulder_rot * elbow_rot).apply(DOWN_NP) * FOREARM_LEN
-
-        # Remap into display frame
-        upper_dir = WORLD_ROT.apply(upper_dir_np)
-        fore_dir  = WORLD_ROT.apply(fore_dir_np)
-
-        # Update joint sphere positions
+    def _tick_playback(self):
+        if not self._playback_frames:
+            self._playing = False; return
+        if self._playback_idx >= len(self._playback_frames):
+            self._playing = False
+            self._play_btn.setText("▶ Replay")
+            self._playback_idx = 0; return
+        upper_dir, fore_dir = self._playback_frames[self._playback_idx]
+        self._playback_idx += 1
         elbow_pos = self._shoulder_pos + upper_dir
         wrist_pos = elbow_pos + fore_dir
-
-        # Move elbow and wrist spheres (translate is absolute — reset first)
-        self._sph_elbow.resetTransform()
-        self._sph_elbow.translate(*elbow_pos)
-        self._sph_wrist.resetTransform()
-        self._sph_wrist.translate(*wrist_pos)
-
-        # Rebuild bone cylinders at new positions
+        self._sph_elbow.resetTransform(); self._sph_elbow.translate(*elbow_pos)
+        self._sph_wrist.resetTransform(); self._sph_wrist.translate(*wrist_pos)
         self._rebuild_bones(elbow_pos, wrist_pos)
 
-        # Status label
-        if calibrated:
-            self._status_lbl.setText("✓ Calibrated — tracking live")
-            self._status_lbl.setStyleSheet("color: #00ffa0; font-size: 11px;")
-        else:
-            n = self._count_connected()
-            self._status_lbl.setText(f"Not calibrated  ({n}/3 connected)")
-            self._status_lbl.setStyleSheet("color: #ffc800; font-size: 11px;")
+    def _tick_live(self):
+        if not self._state: return
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _read_state(self):
-        if self._state is None:
-            q = {n: IDENTITY_Q for n in ["chest", "arm", "wrist"]}
-            return q, q, False
         with self._state.lock:
             calibrated = self._state.calibrated
             q_raw = {n: self._state.slots[n].get_quaternion()
-                     for n in ["chest", "arm", "wrist"]}
-            q_ref = (
-                {n: self._state.calibration_quats.get(n, IDENTITY_Q)
-                 for n in ["chest", "arm", "wrist"]}
-                if calibrated else
-                {n: IDENTITY_Q for n in ["chest", "arm", "wrist"]}
-            )
-        return q_raw, q_ref, calibrated
+                     for n in ["chest","arm","wrist"]}
+            q_ref = ({n: self._state.calibration_quats.get(n, IDENTITY_Q)
+                      for n in ["chest","arm","wrist"]}
+                     if calibrated else
+                     {n: IDENTITY_Q for n in ["chest","arm","wrist"]})
+            flex  = self._state.shoulder_flexion
+            abd   = self._state.shoulder_abduction
+            rot   = self._state.external_rotation
+            elbow = self._state.elbow_flexion
 
-    def _count_connected(self):
-        if self._state is None:
-            return 0
-        with self._state.lock:
-            return sum(
-                1 for n in ["chest", "arm", "wrist"]
-                if self._state.slots[n].connected
-            )
+        # ROM tracking
+        if self._rom_mode:
+            self._rom_max["flex"]  = max(self._rom_max["flex"],  abs(flex))
+            self._rom_max["abd"]   = max(self._rom_max["abd"],   abs(abd))
+            self._rom_max["rot"]   = max(self._rom_max["rot"],   abs(rot))
+            self._rom_max["elbow"] = max(self._rom_max["elbow"], abs(elbow))
 
-    def _on_calibrate(self):
-        if self._state is None:
-            return
-        with self._state.lock:
-            if not self._state.all_connected():
-                print("[RenderWidget] Cannot calibrate — not all sensors connected.")
-                return
-            for name in ["wrist", "arm", "chest"]:
-                self._state.calibration_quats[name] = \
-                    self._state.slots[name].get_quaternion()
-            self._state.calibrated = True
-        print("[RenderWidget] Calibrated.")
+        # Corrected rotations (same pipeline as joint_angles.py)
+        live = {n: self._filters[n].update(q_raw[n]) * MOUNT[n].inv()
+                for n in ["chest","arm","wrist"]}
+        ref  = {n: to_anatomical(q_ref[n], n) for n in ["chest","arm","wrist"]}
+        corr = {n: ref[n].inv() * live[n] for n in ["chest","arm","wrist"]}
+
+        shoulder_rot = corr["chest"].inv() * corr["arm"]
+        elbow_rot    = corr["arm"].inv()   * corr["wrist"]
+
+        # Segment directions: anatomical frame → GL display
+        upper_anat = shoulder_rot.apply(DOWN_NP) * UPPER_ARM_LEN
+        fore_anat  = (shoulder_rot * elbow_rot).apply(DOWN_NP) * FOREARM_LEN
+        upper_disp = WORLD_ROT.apply(upper_anat)
+        fore_disp  = WORLD_ROT.apply(fore_anat)
+
+        # Jump gate
+        def _safe(new, prev):
+            if np.linalg.norm(new) < 1e-6: return prev
+            nn = new / np.linalg.norm(new)
+            pn = prev / (np.linalg.norm(prev) + 1e-9)
+            return prev if abs(np.dot(nn, pn)) < (1. - DIR_JUMP_THRESH) else new
+
+        upper_disp = _safe(upper_disp, self._prev_upper)
+        fore_disp  = _safe(fore_disp,  self._prev_fore)
+        self._prev_upper = upper_disp
+        self._prev_fore  = fore_disp
+
+        elbow_pos = self._shoulder_pos + upper_disp
+        wrist_pos = elbow_pos + fore_disp
+
+        self._sph_elbow.resetTransform(); self._sph_elbow.translate(*elbow_pos)
+        self._sph_wrist.resetTransform(); self._sph_wrist.translate(*wrist_pos)
+        self._rebuild_bones(elbow_pos, wrist_pos)
+
+        if self._recording_geom:
+            self._geom_buf.append((upper_disp.copy(), fore_disp.copy()))
+
+        # Goal interaction
+        if self._goal_active and self._goal_pos is not None:
+            dist = np.linalg.norm(wrist_pos - self._goal_pos)
+            now  = time.monotonic()
+            if dist < GOAL_HIT_DIST:
+                self._goal_sphere.setColor(C_GOAL_HIT)
+                if self._goal_hit_t is None:
+                    self._goal_hit_t = now
+                held = now - self._goal_hit_t
+                rem  = max(0., GOAL_HOLD_S - held)
+                self._goal_lbl.setText(f"Hold! {rem:.1f}s")
+                self._goal_lbl.setStyleSheet("color:#00cc66; font-size:10px; font-weight:bold;")
+                if held >= GOAL_HOLD_S:
+                    self.goal_achieved.emit()
+                    self._goal_hit_t = None
+                    self.clear_goal()
+            elif dist < GOAL_HIT_DIST * 4:
+                self._goal_sphere.setColor(C_GOAL_NEAR)
+                self._goal_hit_t = None
+                self._goal_lbl.setText(f"Close — {dist*100:.0f}cm")
+                self._goal_lbl.setStyleSheet("color:#ccaa00; font-size:10px;")
+            else:
+                self._goal_sphere.setColor(C_GOAL_FAR)
+                self._goal_hit_t = None
+                self._goal_lbl.setText(f"Goal: {dist*100:.0f}cm")
+                self._goal_lbl.setStyleSheet("color:#cc4400; font-size:10px;")
+
+        # Status
+        n_conn = sum(1 for n in ["chest","arm","wrist"]
+                     if self._state.slots[n].connected)
+        if calibrated:
+            self._status_lbl.setText("✓ Calibrated — tracking live")
+            self._status_lbl.setStyleSheet("color:#00cc66; font-size:10px;")
+        else:
+            self._status_lbl.setText(f"Not calibrated  ({n_conn}/3 connected)")
+            self._status_lbl.setStyleSheet("color:#ccaa00; font-size:10px;")
