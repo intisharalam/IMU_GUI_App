@@ -241,7 +241,9 @@ class SessionPanel(QWidget):
             self._rec_btn.setStyleSheet(btn_style(SURFACE2, GREEN3, BORDER))
 
     def refresh(self):
+
         self._render.refresh()
+        
         if not self._running: return
         now = time.monotonic()
 
