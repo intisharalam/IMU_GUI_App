@@ -1,0 +1,32 @@
+========================================================================
+  T3 — QUATERNION PACKET INTEGRITY REPORT
+  Target: 100 packets/sensor, ||q|| in [0.99, 1.01], >= 99% in-range, 0 decode errors
+========================================================================
+
+  Sensor : IMU_WRIST (wrist)  —  C6:4E:28:CF:55:C9
+  Packets collected    : 100 / 100
+  Valid length (16 B)  : 100
+  Decode OK            : 100    (errors: 0)
+  Norm in range        : 100    (pass rate: 100.0%)
+  Norm  min/mean/max   : 0.999968 / 0.999992 / 1.000030
+  Result               : PASS
+
+  Sensor : IMU_ARM (arm)  —  F8:1A:DA:E1:B8:23
+  Packets collected    : 100 / 100
+  Valid length (16 B)  : 100
+  Decode OK            : 100    (errors: 0)
+  Norm in range        : 100    (pass rate: 100.0%)
+  Norm  min/mean/max   : 0.999970 / 1.000018 / 1.000030
+  Result               : PASS
+
+  Sensor : IMU_CHEST (chest)  —  D4:41:CD:B7:71:6B
+  Packets collected    : 100 / 100
+  Valid length (16 B)  : 100
+  Decode OK            : 100    (errors: 0)
+  Norm in range        : 100    (pass rate: 100.0%)
+  Norm  min/mean/max   : 1.000002 / 1.000005 / 1.000021
+  Result               : PASS
+
+========================================================================
+  OVERALL VERDICT: PASS
+========================================================================

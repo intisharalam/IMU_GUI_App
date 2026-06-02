@@ -188,6 +188,23 @@ class SessionPanel(QWidget):
         sml.addWidget(self._smooth_bar, stretch=1); sml.addWidget(self._smooth_val)
         hl.addWidget(sm)
 
+        # Trunk lean indicator (FR-13)
+        _section("TRUNK LEAN")
+        tl_widget = QWidget()
+        tl_lay = QHBoxLayout(tl_widget)
+        tl_lay.setContentsMargins(10, 6, 10, 6); tl_lay.setSpacing(8)
+        self._trunk_val = QLabel("0°")
+        self._trunk_val.setStyleSheet(
+            f"color:{GREEN};font-size:20px;font-weight:bold;"
+            f"font-family:'Courier New',monospace;"
+        )
+        self._trunk_status = QLabel("UPRIGHT")
+        self._trunk_status.setStyleSheet(label_style(GREEN5, 11))
+        self._trunk_status.setWordWrap(True)
+        tl_lay.addWidget(self._trunk_val)
+        tl_lay.addWidget(self._trunk_status, stretch=1)
+        hl.addWidget(tl_widget)
+
         # Haptic log
         _section("HAPTIC LOG")
         self._log_labels = []
@@ -258,6 +275,7 @@ class SessionPanel(QWidget):
             me    = self._state.max_elbow
             reps  = self._state.session_reps
             hlog  = list(self._state.haptic_log)[-5:]
+            trunk = self._state.trunk_lean_deg
 
         # Timer
         elapsed = int(now - self._t_start)
@@ -271,14 +289,40 @@ class SessionPanel(QWidget):
         self._a_rot.update(rot, mr)
         self._a_elbow.update(elbow, me)
 
-        # Smoothness proxy (jerk = abs diff between consecutive angles)
-        jerk = abs(flex - getattr(self, '_prev_flex', flex))
+        # Smoothness — rolling average of abs angle change, normalised to 0–100.
+        # Clamp jerk to [0, 5]° per frame (at 30 Hz, 5° = 150°/s — fast but real).
+        # 0° change → score 100; ≥5° change per frame → score 0.
+        jerk = min(5.0, abs(flex - getattr(self, '_prev_flex', flex)))
         self._prev_flex = flex
-        smooth = max(0, 100 - int(jerk * 10))
-        self._smooth_data.append(smooth)
+        smooth = max(0, int(100 - jerk * 20))   # 5° → 0, 0° → 100
+        self._smooth_data.append(float(smooth))
         if len(self._smooth_data) > 50: self._smooth_data.pop(0)
         self._smooth_curve.setData(self._smooth_data)
         self._smooth_val.setText(str(smooth))
+
+        # Trunk lean display (FR-13)
+        self._trunk_val.setText(f"{trunk:.0f}°")
+        if trunk < 10.0:
+            self._trunk_val.setStyleSheet(
+                f"color:{GREEN5};font-size:20px;font-weight:bold;"
+                f"font-family:'Courier New',monospace;"
+            )
+            self._trunk_status.setText("UPRIGHT")
+            self._trunk_status.setStyleSheet(label_style(GREEN5, 11))
+        elif trunk < 15.0:
+            self._trunk_val.setStyleSheet(
+                f"color:{AMBER};font-size:20px;font-weight:bold;"
+                f"font-family:'Courier New',monospace;"
+            )
+            self._trunk_status.setText("LEANING")
+            self._trunk_status.setStyleSheet(label_style(AMBER, 11))
+        else:
+            self._trunk_val.setStyleSheet(
+                f"color:{RED};font-size:20px;font-weight:bold;"
+                f"font-family:'Courier New',monospace;"
+            )
+            self._trunk_status.setText("STAND STRAIGHT")
+            self._trunk_status.setStyleSheet(label_style(RED, 11, bold=True))
 
         # Haptic log
         for i, lbl in enumerate(self._log_labels):

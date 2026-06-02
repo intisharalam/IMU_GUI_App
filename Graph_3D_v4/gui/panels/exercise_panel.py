@@ -17,23 +17,113 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
+import sqlite3
+from pathlib import Path
 from ble.ble_state import AppState
 from gui.styles import *
 
-# Each entry: (name, icon, difficulty, description, max_pain_allowed)
-# max_pain_allowed = highest pain score at which this exercise is offered.
-# Pain 0-3 → all exercises available.
-# Pain 4-6 → only Easy/Moderate with max_pain >= 6.
-# Pain 7+  → only Easy exercises (pendulum).
+DB_PATH     = Path(__file__).parent.parent.parent / "data"   / "sessions.db"
+ASSETS_DIR  = Path(__file__).parent.parent.parent / "assets"
+
+# Maps exercise name → image filename under ASSETS_DIR.
+# Add an entry here as each image becomes available.
+EXERCISE_IMAGES: dict[str, str] = {
+    "CROSS-BODY STRETCH": "Cross_Body_Stretch.png",
+    "ELBOW CURL":         "Elbow_Curl.png",
+    "FINGER WALL CRAWL":  "Finger_Wall_Crawl.png",
+    "PENDULUM SWING":     "Pendulum_Swing.png",
+    "TOWEL STRETCH":     "towel_stretch.png",
+    "FLEXION RAISE":     "flexion_raise.png",
+    "ABDUCTION RAISE":     "abduction_raise.png",
+}
+
+# Each entry: (name, difficulty, description, primary_angle, min_pain, max_pain)
+#
+# min_pain / max_pain define the pain band in which this exercise is appropriate.
+#   - Pendulum:           pain 4–10  (gentle, pain-dominant phase)
+#   - Easy stretches:     pain 3–8   (moderate pain, building range)
+#   - Moderate raises:    pain 0–6   (lower pain, active mobilisation)
+#   - Hard rotations:     pain 0–4   (recovery / thawing phase)
+#
+# primary_angle: which AppState ROM value drives the ROM TARGET display.
 EXERCISES = [
-    ("FLEXION RAISE",      "🔼", "Moderate", "Raise arm forward in sagittal plane. Primary: shoulder flexion.",     6),
-    ("ABDUCTION",          "↔",  "Moderate", "Raise arm sideways in frontal plane. Primary: shoulder abduction.",   6),
-    ("EXTERNAL ROTATION",  "⟳",  "Hard",     "Rotate arm outward with elbow at 90°. Primary: external rotation.",   4),
-    ("PENDULUM SWING",     "〜",  "Easy",     "Lean forward, arm hangs and swings gently under gravity.",           10),
-    ("ELBOW CURL",         "💪",  "Easy",     "Bend elbow toward shoulder and return. Primary: elbow flexion.",      8),
+    # name                   diff        description                                                              primary     min  max
+    ("PENDULUM SWING",       "Easy",     "Lean forward, arm hangs and swings gently under gravity. "
+                                         "Decompresses the glenohumeral joint. Best for high-pain days.",         "flexion",   4,  10),
+    ("ELBOW CURL",           "Easy",     "Bend elbow toward shoulder and return slowly. "
+                                         "Maintains elbow mobility and warms up the arm without "
+                                         "loading the shoulder.",                                                 "elbow",     3,   8),
+    ("FINGER WALL CRAWL",    "Easy",     "Face a wall and walk fingers upward as far as comfortable. "
+                                         "Builds active flexion range gradually. Physiotherapist's "
+                                         "primary exercise for AC.",                                              "flexion",   3,   8),
+    ("CROSS-BODY STRETCH",   "Easy",     "Use the good arm to gently draw the affected arm across "
+                                         "the chest. Stretches the posterior capsule. Hold 20–30 s.",             "abduction", 3,   7),
+    ("TOWEL STRETCH",        "Moderate", "Hold a towel behind the back — good hand above, affected "
+                                         "hand below. Gently pull upward to stretch internal rotation.",          "ext_rot",   2,   6),
+    ("FLEXION RAISE",        "Moderate", "Raise arm forward in the sagittal plane, as high as "
+                                         "comfortable. Primary measure: shoulder flexion arc.",                   "flexion",   0,   6),
+    ("ABDUCTION RAISE",      "Moderate", "Raise arm sideways in the frontal plane. "
+                                         "Primary measure: shoulder abduction arc.",                              "abduction", 0,   6),
+    ("DOORWAY STRETCH",      "Moderate", "Stand in a doorway, arm at 90°, and lean gently forward. "
+                                         "Passive stretch targeting anterior capsule and pectorals.",             "flexion",   0,   5),
+    ("EXTERNAL ROTATION",    "Hard",     "Elbow at side, bent to 90°. Rotate forearm outward "
+                                         "against gentle resistance or gravity. "
+                                         "Targets the most restricted plane in AC.",                             "ext_rot",   0,   4),
+    ("BEHIND-BACK REACH",    "Hard",     "Reach the affected arm behind the back and slide hand "
+                                         "upward along the spine. Measures combined internal "
+                                         "rotation and extension. Advanced recovery exercise.",                   "ext_rot",   0,   3),
 ]
 
 DIFF_COLOUR = {"Easy": GREEN5, "Moderate": AMBER, "Hard": RED}
+
+
+def _exercise_counts() -> dict[str, tuple[int, str | None]]:
+    """
+    Return {exercise_name: (session_count, last_date_iso)} for all exercises
+    that appear in the sessions DB. Exercises with no history are not in the dict.
+    """
+    if not DB_PATH.exists():
+        return {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        rows = con.execute(
+            "SELECT exercise, COUNT(*) as n, MAX(date) as last "
+            "FROM sessions GROUP BY exercise"
+        ).fetchall()
+        con.close()
+        return {r[0]: (r[1], r[2]) for r in rows}
+    except Exception:
+        return {}
+
+
+def _suggested_exercise(pain: int) -> str | None:
+    """
+    Return the name of the exercise that should be highlighted as the
+    suggested pick for this session.
+
+    Logic (in priority order):
+      1. Only consider exercises currently allowed for this pain level.
+      2. Prefer the exercise with the oldest last-session date
+         (i.e. hasn't been done in the longest time).
+      3. Break ties by lowest total session count.
+      4. If all allowed exercises are equally untried, return the first one.
+    """
+    allowed = [
+        name for name, diff, desc, primary, mn, mx in EXERCISES
+        if mn <= pain <= mx
+    ]
+    if not allowed:
+        return None
+
+    counts = _exercise_counts()   # {name: (count, last_date)}
+
+    def sort_key(name):
+        if name not in counts:
+            return (0, "")          # never done → highest priority (sort first)
+        n, last = counts[name]
+        return (1, last, n)         # done before → sort by oldest date, then fewest
+
+    return sorted(allowed, key=sort_key)[0]
 
 
 class StepperWidget(QWidget):
@@ -139,11 +229,23 @@ class ExercisePanel(QWidget):
             f"QListWidget::item:selected{{background:{GREEN4};color:{GREEN};border-left:2px solid {GREEN};}}"
             f"QListWidget::item:hover{{background:{SURFACE3};}}"
         )
-        for name, icon, diff, _, _max_pain in EXERCISES:
+        for name, diff, desc, primary, mn, mx in EXERCISES:
             item = QListWidgetItem(f"{name}")
             self._ex_list.addItem(item)
         self._ex_list.setCurrentRow(0)
         self._ex_list.currentRowChanged.connect(self._on_select)
+
+        # Status label — shows pain filter state and suggestion hint
+        self._pain_lbl = QLabel("ALL EXERCISES AVAILABLE")
+        self._pain_lbl.setStyleSheet(label_style(GREEN5, 9))
+        self._pain_lbl.setWordWrap(True)
+        llay.addWidget(self._pain_lbl)
+
+        # Legend for the suggestion star
+        legend = QLabel("★ = suggested for this session")
+        legend.setStyleSheet(label_style(AMBER, 9, bold=False))
+        llay.addWidget(legend)
+
         llay.addWidget(self._ex_list, stretch=1)
         body.addWidget(left_w)
 
@@ -151,16 +253,10 @@ class ExercisePanel(QWidget):
         right_w = QWidget()
         rlay = QVBoxLayout(right_w); rlay.setContentsMargins(20,14,20,0); rlay.setSpacing(10)
 
-        # Hero card
+        # Hero card — name, difficulty badge, description only
         hero = QFrame(); hero.setStyleSheet(card_style(SURFACE2, BORDER2))
         hl = QHBoxLayout(hero); hl.setContentsMargins(14,12,14,12); hl.setSpacing(14)
-        # self._hero_icon = QLabel("🔼")
-        # self._hero_icon.setStyleSheet(
-        #     f"font-size:40px;background:{SURFACE3};border:1px solid {BORDER};"
-        #     f"border-radius:3px;padding:10px;min-width:70px;text-align:center;"
-        # )
-        # self._hero_icon.setAlignment(Qt.AlignCenter)
-        # self._hero_icon.setFixedSize(80,80)
+
         hero_txt = QVBoxLayout(); hero_txt.setSpacing(4)
         self._hero_name = QLabel("FLEXION RAISE")
         self._hero_name.setStyleSheet(label_style(GREEN, 15, bold=True))
@@ -172,7 +268,7 @@ class ExercisePanel(QWidget):
         hero_txt.addWidget(self._hero_name)
         hero_txt.addWidget(self._hero_diff)
         hero_txt.addWidget(self._hero_desc)
-        # hl.addWidget(self._hero_icon) 
+        hero_txt.addStretch()
         hl.addLayout(hero_txt, stretch=1)
         rlay.addWidget(hero)
 
@@ -200,6 +296,21 @@ class ExercisePanel(QWidget):
         cfg_row.addWidget(rom_frame, stretch=1)
         rlay.addLayout(cfg_row)
 
+        # ── Exercise image ────────────────────────────────────────────────────
+        img_frame = QFrame()
+        img_frame.setStyleSheet(card_style(SURFACE2, BORDER))
+        img_lay = QHBoxLayout(img_frame)
+        img_lay.setContentsMargins(12, 10, 12, 10)
+
+        self._ex_img = QLabel()
+        self._ex_img.setFixedHeight(200)
+        self._ex_img.setAlignment(Qt.AlignCenter)
+        self._ex_img.setStyleSheet(
+            f"background:transparent; border:none; color:{GREEN3}; font-size:11px;"
+        )
+        img_lay.addWidget(self._ex_img)
+        rlay.addWidget(img_frame)
+
         # Pain + start
         foot = QWidget(); foot.setFixedHeight(54)
         foot.setStyleSheet(f"background:{SURFACE};border-top:1px solid {BORDER};")
@@ -223,6 +334,27 @@ class ExercisePanel(QWidget):
         root.addWidget(foot)
 
         self._update_detail(0)
+        self._apply_pain_filter(0)   # initial pass — all exercises available, suggestion computed
+
+    def _load_exercise_image(self, name: str):
+        """Load and display the exercise photo, or show a 'no image' placeholder."""
+        from PyQt5.QtGui import QPixmap
+        filename = EXERCISE_IMAGES.get(name)
+        if filename:
+            path = ASSETS_DIR / filename
+            if path.exists():
+                pixmap = QPixmap(str(path))
+                if not pixmap.isNull():
+                    # Scale to fit within the label height, preserve aspect ratio
+                    scaled = pixmap.scaledToHeight(
+                        self._ex_img.height(), Qt.SmoothTransformation
+                    )
+                    self._ex_img.setPixmap(scaled)
+                    self._ex_img.setToolTip(name)
+                    return
+        # Placeholder — image not available yet
+        self._ex_img.setPixmap(QPixmap())   # clear any previous image
+        self._ex_img.setText("No image available yet")
 
     def _stat_row(self, layout, label):
         row = QHBoxLayout(); row.setSpacing(4)
@@ -233,44 +365,58 @@ class ExercisePanel(QWidget):
         return val
 
     def _apply_pain_filter(self, pain: int):
-        if not hasattr(self, '_pain_lbl'):
-            return
-        """Show/dim exercises based on current pain score."""
-        from PyQt5.QtGui import QColor
+        """Show/dim exercises based on current pain score, and badge the suggestion."""
+        from PyQt5.QtGui import QColor, QFont
         from PyQt5.QtCore import Qt
-        available = 0
-        first_available = 0
-        for i, (name, icon, diff, desc, max_pain) in enumerate(EXERCISES):
+
+        suggestion = _suggested_exercise(pain)
+
+        available_indices = []
+        for i, (name, diff, desc, primary, mn, mx) in enumerate(EXERCISES):
             item = self._ex_list.item(i)
             if item is None:
                 continue
-            allowed = pain <= max_pain
+            allowed = mn <= pain <= mx
             if allowed:
                 item.setFlags(item.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                item.setForeground(QColor(TEXT2))
-                available += 1
-                if available == 1:
-                    first_available = i
+                item.setForeground(QColor(TEXT))
+                available_indices.append(i)
+
+                # Suggestion highlight — amber background + label
+                if name == suggestion:
+                    item.setBackground(QColor("#fff8e8"))   # pale amber tint
+                    item.setText(f"{name}  ★")
+                else:
+                    item.setBackground(QColor(SURFACE))
+                    item.setText(name)
             else:
                 item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
                 item.setForeground(QColor(GREEN_DIM))
+                item.setBackground(QColor(SURFACE2))
+                item.setText(name)
 
-        if pain <= 3:
-            self._pain_lbl.setText("ALL EXERCISES AVAILABLE")
-            self._pain_lbl.setStyleSheet(label_style(GREEN3, 9))
-        elif pain <= 6:
-            self._pain_lbl.setText(f"PAIN {pain}/10 — HARD EXERCISES RESTRICTED")
-            self._pain_lbl.setStyleSheet(label_style(AMBER, 9))
-        else:
-            self._pain_lbl.setText(f"PAIN {pain}/10 — GENTLE EXERCISES ONLY")
-            self._pain_lbl.setStyleSheet(label_style(RED, 9))
+        # Update the pain status label
+        if hasattr(self, '_pain_lbl'):
+            if pain <= 3:
+                self._pain_lbl.setText("ALL EXERCISES AVAILABLE")
+                self._pain_lbl.setStyleSheet(label_style(GREEN5, 9))
+            elif pain <= 6:
+                self._pain_lbl.setText(f"PAIN {pain}/10 — HARD EXERCISES RESTRICTED")
+                self._pain_lbl.setStyleSheet(label_style(AMBER, 9))
+            else:
+                self._pain_lbl.setText(f"PAIN {pain}/10 — GENTLE EXERCISES ONLY")
+                self._pain_lbl.setStyleSheet(label_style(RED, 9))
 
-        # Move selection to first available if current is locked
+        # If suggestion exists and nothing is selected, pre-select it
         cur = self._ex_list.currentRow()
-        if cur >= 0:
-            cur_item = self._ex_list.item(cur)
-            if cur_item and not (cur_item.flags() & Qt.ItemIsEnabled):
-                self._ex_list.setCurrentRow(first_available)
+        cur_item = cur >= 0 and self._ex_list.item(cur)
+        if cur_item and not (cur_item.flags() & Qt.ItemIsEnabled):
+            # Current selection just got locked — move to suggestion or first available
+            target = next(
+                (i for i, (name, *_) in enumerate(EXERCISES) if name == suggestion),
+                available_indices[0] if available_indices else 0
+            )
+            self._ex_list.setCurrentRow(target)
 
     def _on_select(self, idx):
         self._sel_idx = idx
@@ -278,12 +424,13 @@ class ExercisePanel(QWidget):
         self._repdet.set_exercise(EXERCISES[idx][0])
 
     def _update_detail(self, idx):
-        name, icon, diff, desc, _ = EXERCISES[idx]
+        name, diff, desc, primary, mn, mx = EXERCISES[idx]
         self._hero_name.setText(name)
-        # self._hero_icon.setText(icon)
-        self._hero_diff.setText(f"● {diff.upper()}")
+        self._hero_diff.setText(f"● {diff.upper()}   Pain {mn}–{mx}")
         self._hero_diff.setStyleSheet(label_style(DIFF_COLOUR.get(diff, GREEN3), 10))
         self._hero_desc.setText(desc)
+        self._load_exercise_image(name)
+        self._load_exercise_image(name)
 
     def _on_start(self):
         with self._state.lock:
@@ -300,13 +447,19 @@ class ExercisePanel(QWidget):
             rom_flex  = self._state.rom_flex_limit
             rom_abd   = self._state.rom_abd_limit
             measured  = getattr(self._state, 'rom_measured', False)
+
         self._rom_flex_lbl.setText(f"{rom_flex:.0f}°")
         self._rom_abd_lbl.setText(f"{rom_abd:.0f}°")
-        goal = rom_flex * 0.9 if "FLEX" in EXERCISES[self._sel_idx][0] else rom_abd * 0.9
-        self._rom_goal_lbl.setText(f"{goal:.0f}°  (90%)")
+
+        # ROM goal uses the primary axis for the selected exercise
+        primary = EXERCISES[self._sel_idx][3]
+        base = rom_flex if primary in ("flexion", "elbow") else rom_abd
+        goal = base * 0.9
+        self._rom_goal_lbl.setText(f"{goal:.0f}°  (90% of measured)")
+
         if measured:
             self._rom_meas_lbl.setText("✓ ROM MEASURED")
-            self._rom_meas_lbl.setStyleSheet(label_style(GREEN, 12))
+            self._rom_meas_lbl.setStyleSheet(label_style(GREEN5, 12))
         else:
             self._rom_meas_lbl.setText("MEASURE ROM FIRST (Connect panel)")
             self._rom_meas_lbl.setStyleSheet(label_style(AMBER, 12))

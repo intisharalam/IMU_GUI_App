@@ -1,0 +1,4 @@
+slot,device,address,n_total,n_valid_length,n_decode_ok,n_decode_errors,n_norm_in_range,norm_pass_rate,norm_min,norm_mean,norm_max,passed,fail_reason
+wrist,IMU_WRIST,,0,0,0,0,0,0.0,,,,False,Device 'IMU_WRIST' not found within 20 s
+arm,IMU_ARM,F8:1A:DA:E1:B8:23,100,100,100,0,100,100.0,0.999988,1.000007,1.000019,True,—
+chest,IMU_CHEST,,0,0,0,0,0,0.0,,,,False,Device 'IMU_CHEST' not found within 20 s
