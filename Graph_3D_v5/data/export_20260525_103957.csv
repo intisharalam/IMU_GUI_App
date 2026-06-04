@@ -1,4 +1,0 @@
-Session#,Date,Exercise,Duration(s),Reps,MaxFlex(deg),MaxAbd(deg),MaxExtRot(deg),MaxElbow(deg),PainPre(0-10),PainPost(0-10),CSVFile
-1,2026-05-25T10:37:51.192177,PENDULUM SWING,47.0,0,0.0,0.0,0.0,0.0,5,6,c:\Users\intis\OneDrive - Imperial College London\Frozen_Shoulder_Physiotherapy_FYP\Software\main\IMU_GUI_App\Graph_3D_v4\data\session_20260525_103704.csv
-2,2026-05-25T10:38:52.076675,FLEXION RAISE,26.9,0,0.0,0.0,0.0,0.0,8,5,c:\Users\intis\OneDrive - Imperial College London\Frozen_Shoulder_Physiotherapy_FYP\Software\main\IMU_GUI_App\Graph_3D_v4\data\session_20260525_103825.csv
-3,2026-05-25T10:39:28.332363,PENDULUM SWING,21.2,0,0.0,0.0,0.0,0.0,5,3,c:\Users\intis\OneDrive - Imperial College London\Frozen_Shoulder_Physiotherapy_FYP\Software\main\IMU_GUI_App\Graph_3D_v4\data\session_20260525_103907.csv
