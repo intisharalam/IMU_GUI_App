@@ -35,7 +35,7 @@ from calc.exercise_library import get_exercise, ExerciseDef
 from gui.styles import *
 from gui.widgets.render_widget import RenderWidget
 
-from ble.ble_manager import CMD_HAPTIC_SET, CMD_HAPTIC_REST_END
+from ble.ble_manager import CMD_HAPTIC_SET, CMD_HAPTIC_REST_START, CMD_HAPTIC_REST_END
 
 DOWN_NP = np.array([0., -1., 0.])
 GOAL_ROM_FRACTION = 0.90
@@ -547,14 +547,13 @@ class SessionPanel(QWidget):
             # All sets done — end session automatically
             self._on_end()
             return
-        self._ble.send_haptic_all(CMD_HAPTIC_SET)
         self._rest_overlay.start(self._current_set, self._sets_total)
-        self._hud_stack.setCurrentIndex(1)
+        self._hud_stack.setCurrentIndex(1)  # show rest overlay
 
     def _on_resume(self):
         self._current_set += 1
         self._resting = False
-        self._ble.send_haptic_all(CMD_HAPTIC_REST_END)
+        self._ble.send_haptic_all(CMD_HAPTIC_REST_START)
         self._hud_stack.setCurrentIndex(0)
         # Re-show the guide for the next set
         if self._current_ex is not None:
@@ -622,16 +621,20 @@ class SessionPanel(QWidget):
         self._smooth_curve.setData(self._smooth_data)
         self._smooth_val.setText(str(smooth))
 
-        # Trunk lean
+        # Trunk lean — thresholds from live settings
+        with self._state.lock:
+            trunk_limit = self._state.trunk_lean_limit
+        warn_thresh = trunk_limit
+        err_thresh  = trunk_limit + 5.0
         self._trunk_val.setText(f"{trunk:.0f}°")
-        if trunk < 10.0:
+        if trunk < warn_thresh:
             self._trunk_val.setStyleSheet(
                 f"color:{GREEN5};font-size:20px;font-weight:bold;"
                 f"font-family:'Courier New',monospace;"
             )
             self._trunk_status.setText("UPRIGHT")
             self._trunk_status.setStyleSheet(label_style(GREEN5, 11))
-        elif trunk < 15.0:
+        elif trunk < err_thresh:
             self._trunk_val.setStyleSheet(
                 f"color:{AMBER};font-size:20px;font-weight:bold;"
                 f"font-family:'Courier New',monospace;"
@@ -663,10 +666,15 @@ class SessionPanel(QWidget):
     # ── Internal callbacks ────────────────────────────────────────────────────
 
     def _on_end(self):
-        self._running = False
         self._resting = False
         self._rest_overlay.hide_overlay()
         self._render.clear_exercise_guide()
+        # Keep _running True so the HUD keeps updating during the delay.
+        # It will be set False in _show_end_dialog just before the dialog opens.
+        QTimer.singleShot(1000, self._show_end_dialog)
+
+    def _show_end_dialog(self):
+        self._running = False   # freeze HUD now, right as dialog appears
         dlg = EndSessionDialog(self)
         pain_post = dlg.pain if dlg.exec_() == QDialog.Accepted else 0
         self.session_ended.emit(pain_post)

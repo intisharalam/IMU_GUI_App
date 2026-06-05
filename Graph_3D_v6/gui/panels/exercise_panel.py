@@ -97,6 +97,10 @@ class StepperWidget(QWidget):
         if self._val < self._max: self._val += 1; self._disp.setText(str(self._val))
     @property
     def value(self): return self._val
+    def set_value(self, v: int):
+        v = max(self._min, min(self._max, int(v)))
+        self._val = v
+        self._disp.setText(str(v))
 
 
 class PainSelector(QWidget):
@@ -219,9 +223,13 @@ class ExercisePanel(QWidget):
         cfg_frame = QFrame(); cfg_frame.setStyleSheet(card_style(SURFACE2, BORDER))
         cf = QVBoxLayout(cfg_frame); cf.setContentsMargins(12,10,12,10); cf.setSpacing(6)
         cf.addWidget(QLabel("CONFIGURATION").also(lambda l: l.setStyleSheet(label_style(GREEN3, 11))))
-        self._sets_w = StepperWidget("SETS",    3, 1, 10)
-        self._reps_w = StepperWidget("REPS",   10, 1, 30)
-        self._hold_w = StepperWidget("HOLD(s)", 3, 1, 10)
+        with self._state.lock:
+            _def_sets = self._state.default_sets
+            _def_reps = self._state.default_reps
+
+        self._sets_w = StepperWidget("SETS",    _def_sets,  1, 10)
+        self._reps_w = StepperWidget("REPS",   _def_reps,  1, 30)
+        self._hold_w = StepperWidget("HOLD(s)", 25, 5, 120)
         cf.addWidget(self._sets_w); cf.addWidget(self._reps_w); cf.addWidget(self._hold_w)
 
         rom_frame = QFrame(); rom_frame.setStyleSheet(card_style(SURFACE2, BORDER))
@@ -363,16 +371,21 @@ class ExercisePanel(QWidget):
         )
         self._hero_diff.setStyleSheet(label_style(diff_col, 10))
 
-        # Mode badge: REPS or HOLD
+        # Mode badge + show/hide steppers based on exercise type
         if ex.is_hold_exercise:
-            self._hero_mode.setText(f"⏱  HOLD — {ex.hold_duration_s:.0f} s target")
+            self._hero_mode.setText(f"⏱  HOLD — target adjustable below")
             self._hero_mode.setStyleSheet(label_style(CYAN, 11))
+            self._reps_w.setVisible(False)
+            self._hold_w.setVisible(True)
+            self._hold_w.set_value(max(1, min(300, int(ex.hold_duration_s))))
         else:
             self._hero_mode.setText(
                 f"↕  REPS — track: {ex.rep_angle}  "
                 f"enter {ex.rep_enter_deg:.0f}°  exit {ex.rep_exit_deg:.0f}°"
             )
             self._hero_mode.setStyleSheet(label_style(GREEN3, 11))
+            self._reps_w.setVisible(True)
+            self._hold_w.setVisible(False)
 
         self._hero_desc.setText(ex.description)
         self._load_image(ex)
@@ -382,11 +395,12 @@ class ExercisePanel(QWidget):
             if not self._state.calibrated:
                 return
         ex = EXERCISES[self._sel_idx]
+        reps_or_hold = self._hold_w.value if ex.is_hold_exercise else self._reps_w.value
         self.start_session_requested.emit(
             ex.name,
             self._pain_sel.value,
             self._sets_w.value,
-            self._reps_w.value,
+            reps_or_hold,
         )
 
     def refresh(self):
@@ -401,10 +415,11 @@ class ExercisePanel(QWidget):
         ex = EXERCISES[self._sel_idx]
         # Show goal based on which axis the exercise targets
         if ex.goal_abd_deg > 0:
-            base = rom_abd
+            self._rom_goal_lbl.setText(f"{rom_abd:.0f}°  (abduction)")
+        elif ex.goal_flex_deg > 0:
+            self._rom_goal_lbl.setText(f"{rom_flex:.0f}°  (flexion)")
         else:
-            base = rom_flex
-        self._rom_goal_lbl.setText(f"{base * 0.9:.0f}°  (90% of measured)")
+            self._rom_goal_lbl.setText("—")
 
         if measured:
             self._rom_meas_lbl.setText("✓ ROM MEASURED")

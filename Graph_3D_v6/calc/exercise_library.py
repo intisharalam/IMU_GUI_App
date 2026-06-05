@@ -166,8 +166,9 @@ EXERCISES: list[ExerciseDef] = [
         image_file  = "Finger_Wall_Crawl.png",
         min_pain    = 3, max_pain = 8,
         rep_angle   = "flexion",
-        rep_enter_deg = 30.0, rep_exit_deg = 15.0,
-        rep_hold_s    = 0.5,
+        rep_enter_deg = 50.0,   # wall crawl is slow — needs a high, committed position
+        rep_exit_deg  = 20.0,
+        rep_hold_s    = 1.0,    # must hold at peak for 1 s before counting
         goal_flex_deg = 90.0,
         expected_plane = "sagittal",
         smooth_angle   = "flexion",
@@ -243,56 +244,56 @@ EXERCISES: list[ExerciseDef] = [
         smooth_angle   = "abduction",
     ),
 
-    ExerciseDef(
-        name        = "DOORWAY STRETCH",
-        difficulty  = "Moderate",
-        description = (
-            "Stand in a doorway with the arm at 90° against the frame. "
-            "Lean gently forward until a stretch is felt across the "
-            "front of the chest and shoulder. Hold for 20–30 seconds. "
-            "Targets the anterior capsule and pectorals."
-        ),
-        image_file  = None,
-        min_pain    = 0, max_pain = 5,
-        rep_angle   = None,
-        hold_duration_s = 25.0,
-        goal_flex_deg = 70.0,
-        smooth_angle  = "flexion",
-    ),
+    # ExerciseDef(
+    #     name        = "DOORWAY STRETCH",
+    #     difficulty  = "Moderate",
+    #     description = (
+    #         "Stand in a doorway with the arm at 90° against the frame. "
+    #         "Lean gently forward until a stretch is felt across the "
+    #         "front of the chest and shoulder. Hold for 20–30 seconds. "
+    #         "Targets the anterior capsule and pectorals."
+    #     ),
+    #     image_file  = None,
+    #     min_pain    = 0, max_pain = 5,
+    #     rep_angle   = None,
+    #     hold_duration_s = 25.0,
+    #     goal_flex_deg = 70.0,
+    #     smooth_angle  = "flexion",
+    # ),
 
-    ExerciseDef(
-        name        = "EXTERNAL ROTATION",
-        difficulty  = "Hard",
-        description = (
-            "Keep the elbow tucked at your side and bent to 90°. "
-            "Rotate the forearm outward — hold at maximum rotation for 2 seconds "
-            "— then return slowly. Keep the elbow pinned to your side throughout. "
-            "Targets the most restricted plane in adhesive capsulitis."
-        ),
-        image_file  = None,
-        min_pain    = 0, max_pain = 4,
-        rep_angle   = "ext_rot",
-        rep_enter_deg = 20.0, rep_exit_deg = 8.0,
-        rep_hold_s    = 0.6,
-        smooth_angle  = "ext_rot",
-    ),
+    # ExerciseDef(
+    #     name        = "EXTERNAL ROTATION",
+    #     difficulty  = "Hard",
+    #     description = (
+    #         "Keep the elbow tucked at your side and bent to 90°. "
+    #         "Rotate the forearm outward — hold at maximum rotation for 2 seconds "
+    #         "— then return slowly. Keep the elbow pinned to your side throughout. "
+    #         "Targets the most restricted plane in adhesive capsulitis."
+    #     ),
+    #     image_file  = None,
+    #     min_pain    = 0, max_pain = 4,
+    #     rep_angle   = "ext_rot",
+    #     rep_enter_deg = 20.0, rep_exit_deg = 8.0,
+    #     rep_hold_s    = 0.6,
+    #     smooth_angle  = "ext_rot",
+    # ),
 
-    ExerciseDef(
-        name        = "BEHIND-BACK REACH",
-        difficulty  = "Hard",
-        description = (
-            "Reach the affected arm behind the back and slide the hand "
-            "upward along the spine — hold at your highest point for 2 seconds "
-            "— then lower slowly. "
-            "Advanced recovery exercise for the thawing phase."
-        ),
-        image_file  = None,
-        min_pain    = 0, max_pain = 3,
-        rep_angle   = "ext_rot",
-        rep_enter_deg = 15.0, rep_exit_deg = 5.0,
-        rep_hold_s    = 0.6,
-        smooth_angle  = "ext_rot",
-    ),
+    # ExerciseDef(
+    #     name        = "BEHIND-BACK REACH",
+    #     difficulty  = "Hard",
+    #     description = (
+    #         "Reach the affected arm behind the back and slide the hand "
+    #         "upward along the spine — hold at your highest point for 2 seconds "
+    #         "— then lower slowly. "
+    #         "Advanced recovery exercise for the thawing phase."
+    #     ),
+    #     image_file  = None,
+    #     min_pain    = 0, max_pain = 3,
+    #     rep_angle   = "ext_rot",
+    #     rep_enter_deg = 15.0, rep_exit_deg = 5.0,
+    #     rep_hold_s    = 0.6,
+    #     smooth_angle  = "ext_rot",
+    # ),
 ]
 
 

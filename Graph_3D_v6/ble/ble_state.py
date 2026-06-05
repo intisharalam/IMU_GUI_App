@@ -147,6 +147,18 @@ class AppState:
         self.elbow_hist       = collections.deque(maxlen=PLOT_BUFFER_SIZE)
 
 
+        # --- User-configurable settings (written by SettingsPanel) ---
+        self.affected_side       = "right"   # "right" | "left"
+        self.haptic_rep          = True      # fire haptic on rep complete
+        self.haptic_rom          = True      # fire haptic at ROM boundary
+        self.haptic_deviation    = True      # fire haptic on plane deviation
+        self.haptic_trunk        = True      # fire haptic on trunk lean
+        self.haptic_hold         = True      # fire haptic on hold complete
+        self.rom_goal_fraction   = 0.90      # goal sphere at X% of ROM limit
+        self.trunk_lean_limit    = 10.0      # degrees before trunk haptic fires
+        self.default_sets        = 3         # pre-filled in exercise panel
+        self.default_reps        = 10        # pre-filled in exercise panel
+
         # --- Session / exercise state (written by GUI, read by panels) ---
         self.session_active      = False
         self.session_reps        = 0

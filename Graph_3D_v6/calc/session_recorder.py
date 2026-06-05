@@ -1,5 +1,5 @@
 """
-session_recorder.py  —  v3
+session_recorder.py  —  v4
 --------------------------
 Records session data to CSV (per-session) and SQLite (sessions index).
 
@@ -7,14 +7,15 @@ CSV:  data/session_YYYYMMDD_HHMMSS.csv
       Columns: timestamp_s, flexion, abduction, ext_rot, elbow
 
 SQLite: data/sessions.db
-        Table sessions: id, date, duration_s, max_flex, max_abd,
-                        max_ext_rot, max_elbow, reps, pain_pre,
-                        pain_post, exercise, csv_file
+        Table sessions: id, date, exercise, duration_s, reps,
+                        max_flex, max_abd, max_ext_rot, max_elbow,
+                        pain_pre, pain_post
 
 Usage:
     rec = SessionRecorder()
     rec.start_session(exercise="Shoulder Flexion Raise", pain_pre=3)
     rec.record_frame(timestamp, flex, abd, rot, elbow)   # called every frame
+    rec.increment_reps()                                  # called on each rep
     summary = rec.end_session(pain_post=2)
 """
 
@@ -41,10 +42,39 @@ def _ensure_db():
             max_ext_rot REAL,
             max_elbow   REAL,
             pain_pre    INTEGER,
-            pain_post   INTEGER,
-            csv_file    TEXT
+            pain_post   INTEGER
         )
     """)
+    # Migration: drop csv_file column from older databases that still have it.
+    cols = [row[1] for row in con.execute("PRAGMA table_info(sessions)").fetchall()]
+    if "csv_file" in cols:
+        # SQLite < 3.35 has no DROP COLUMN — rebuild the table instead.
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS sessions_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT,
+                exercise    TEXT,
+                duration_s  REAL,
+                reps        INTEGER,
+                max_flex    REAL,
+                max_abd     REAL,
+                max_ext_rot REAL,
+                max_elbow   REAL,
+                pain_pre    INTEGER,
+                pain_post   INTEGER
+            )
+        """)
+        con.execute("""
+            INSERT INTO sessions_new
+                (id, date, exercise, duration_s, reps,
+                 max_flex, max_abd, max_ext_rot, max_elbow, pain_pre, pain_post)
+            SELECT  id, date, exercise, duration_s, reps,
+                    max_flex, max_abd, max_ext_rot, max_elbow, pain_pre, pain_post
+            FROM sessions
+        """)
+        con.execute("DROP TABLE sessions")
+        con.execute("ALTER TABLE sessions_new RENAME TO sessions")
+        print("[DB] Migrated sessions table — removed csv_file column.")
     con.commit()
     con.close()
 
@@ -52,7 +82,6 @@ def _ensure_db():
 class SessionRecorder:
     def __init__(self):
         _ensure_db()
-        self._csv_file   = None
         self._csv_writer = None
         self._csv_handle = None
         self._active     = False
@@ -71,7 +100,6 @@ class SessionRecorder:
         self._csv_handle = open(filename, "w", newline="")
         self._csv_writer = csv.writer(self._csv_handle)
         self._csv_writer.writerow(["timestamp_s","flexion","abduction","ext_rot","elbow"])
-        self._csv_file  = str(filename)
         self._t_start   = time.monotonic()
         self._exercise  = exercise
         self._pain_pre  = pain_pre
@@ -105,8 +133,8 @@ class SessionRecorder:
         con.execute("""
             INSERT INTO sessions
             (date, exercise, duration_s, reps, max_flex, max_abd,
-             max_ext_rot, max_elbow, pain_pre, pain_post, csv_file)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             max_ext_rot, max_elbow, pain_pre, pain_post)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.now().isoformat(),
             self._exercise,
@@ -118,7 +146,6 @@ class SessionRecorder:
             round(self._max["elbow"], 1),
             self._pain_pre,
             pain_post,
-            self._csv_file,
         ))
         con.commit()
         con.close()

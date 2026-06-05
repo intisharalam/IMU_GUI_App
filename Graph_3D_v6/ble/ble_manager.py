@@ -229,13 +229,5 @@ class BLEManager:
             await client.write_gatt_char(UART_RX_UUID, payload, response=False)
             print(f"[BLE] Sent command {payload.hex()} to {slot_name}")
 
-            # Flash the haptic indicator in the GUI for 0.5 s
-            if payload == CMD_HAPTIC:
-                with self._state.lock:
-                    self._state.slots[slot_name].haptic_active = True
-                await asyncio.sleep(0.5)
-                with self._state.lock:
-                    self._state.slots[slot_name].haptic_active = False
-
         except Exception as e:
             print(f"[BLE] Send error to {slot_name}: {e}")

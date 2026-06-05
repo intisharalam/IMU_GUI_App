@@ -33,6 +33,11 @@ class Calibration:
         self._capturing       = False
         self._thread          = None
         self._t_end           = None   # set during capture, read by GUI
+        self._on_complete     = None   # optional callback fired when done
+
+    def set_complete_callback(self, fn):
+        """Register a zero-arg callable to be invoked when capture finishes."""
+        self._on_complete = fn
 
     def capture(self) -> bool:
         with self._state.lock:
@@ -83,3 +88,5 @@ class Calibration:
         print("[CAL] Done.")
         for n, q in refs.items():
             print(f"  {n}: w={q[0]:.4f} x={q[1]:.4f} y={q[2]:.4f} z={q[3]:.4f}")
+        if self._on_complete:
+            self._on_complete()

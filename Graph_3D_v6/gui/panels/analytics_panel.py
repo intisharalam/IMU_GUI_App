@@ -186,22 +186,53 @@ class AnalyticsPanel(QWidget):
     def _build_trends(self):
         w = QWidget()
         lay = QVBoxLayout(w); lay.setContentsMargins(16,14,16,14); lay.setSpacing(12)
-        lay.addWidget(QLabel("ROM OVER SESSIONS").also(lambda l: l.setStyleSheet(label_style(GREEN3, 12))))
 
-        self._trend_plot = pg.PlotWidget(background=SURFACE2)
-        self._trend_plot.showGrid(x=True, y=True, alpha=0.15)
-        self._trend_plot.getAxis("left").setTextPen(GREEN3)
-        self._trend_plot.getAxis("bottom").setTextPen(GREEN3)
-        self._trend_plot.getAxis("left").setPen(BORDER)
-        self._trend_plot.getAxis("bottom").setPen(BORDER)
-        self._trend_plot.setLabel("left", "Degrees", color=GREEN3)
-        self._trend_plot.setLabel("bottom", "Session #", color=GREEN3)
-        self._flex_trend  = self._trend_plot.plot(pen=pg.mkPen(C_FLEX,   width=2), name="Flexion")
-        self._abd_trend   = self._trend_plot.plot(pen=pg.mkPen(C_ABD,    width=2), name="Abduction")
-        self._rot_trend   = self._trend_plot.plot(pen=pg.mkPen(C_ROT,    width=2), name="Ext Rot")
-        self._elbow_trend = self._trend_plot.plot(pen=pg.mkPen(C_ELBOW,  width=2), name="Elbow")
-        self._trend_plot.addLegend()
-        lay.addWidget(self._trend_plot, stretch=1)
+        # ── Shoulder ROM plot ─────────────────────────────────────────────────
+        lay.addWidget(QLabel("SHOULDER ROM").also(
+            lambda l: l.setStyleSheet(label_style(GREEN3, 12))
+        ))
+        self._shoulder_plot = pg.PlotWidget(background=SURFACE2)
+        self._shoulder_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._shoulder_plot.setLabel("left",   "Degrees", color=GREEN3)
+        self._shoulder_plot.setLabel("bottom", "Session #", color=GREEN3)
+        for ax in ("left", "bottom"):
+            self._shoulder_plot.getAxis(ax).setTextPen(GREEN3)
+            self._shoulder_plot.getAxis(ax).setPen(BORDER)
+        # legend BEFORE plot() so items are captured automatically
+        shoulder_legend = self._shoulder_plot.addLegend(
+            offset=(10, 10), brush=pg.mkBrush(SURFACE2 + "ee"),
+            pen=pg.mkPen(BORDER)
+        )
+        self._flex_trend  = self._shoulder_plot.plot(
+            pen=pg.mkPen(C_FLEX, width=2), name="Flexion"
+        )
+        self._abd_trend   = self._shoulder_plot.plot(
+            pen=pg.mkPen(C_ABD,  width=2), name="Abduction"
+        )
+        self._rot_trend   = self._shoulder_plot.plot(
+            pen=pg.mkPen(C_ROT,  width=2), name="Ext Rotation"
+        )
+        lay.addWidget(self._shoulder_plot, stretch=1)
+
+        # ── Elbow ROM plot ────────────────────────────────────────────────────
+        lay.addWidget(QLabel("ELBOW ROM").also(
+            lambda l: l.setStyleSheet(label_style(GREEN3, 12))
+        ))
+        self._elbow_plot = pg.PlotWidget(background=SURFACE2)
+        self._elbow_plot.showGrid(x=True, y=True, alpha=0.15)
+        self._elbow_plot.setLabel("left",   "Degrees", color=GREEN3)
+        self._elbow_plot.setLabel("bottom", "Session #", color=GREEN3)
+        for ax in ("left", "bottom"):
+            self._elbow_plot.getAxis(ax).setTextPen(GREEN3)
+            self._elbow_plot.getAxis(ax).setPen(BORDER)
+        elbow_legend = self._elbow_plot.addLegend(
+            offset=(10, 10), brush=pg.mkBrush(SURFACE2 + "ee"),
+            pen=pg.mkPen(BORDER)
+        )
+        self._elbow_trend = self._elbow_plot.plot(
+            pen=pg.mkPen(C_ELBOW, width=2), name="Elbow Flexion"
+        )
+        lay.addWidget(self._elbow_plot, stretch=1)
         return w
 
     def _build_history(self):
@@ -216,7 +247,8 @@ class AnalyticsPanel(QWidget):
             f"color:{TEXT2};border:none;gridline-color:{BORDER};}}"
             f"QTableWidget::item:selected{{background:{GREEN4};color:{GREEN};}}"
         )
-        headers = ["#","DATE","EXERCISE","DUR","REPS","FLEX°","ABD°","SMOOTH","PAIN"]
+        headers = ["#", "DATE", "EXERCISE", "DUR", "REPS",
+                   "FLEX°", "ABD°", "EXT ROT°", "ELBOW°", "PAIN PRE", "PAIN POST"]
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
         lay.addWidget(self._table)
@@ -233,9 +265,12 @@ class AnalyticsPanel(QWidget):
         self._pain_plot.getAxis("bottom").setTextPen(GREEN3)
         self._pain_plot.getAxis("left").setPen(BORDER)
         self._pain_plot.getAxis("bottom").setPen(BORDER)
-        self._pain_pre_curve  = self._pain_plot.plot(pen=pg.mkPen(AMBER, width=2), name="Pre")
-        self._pain_post_curve = self._pain_plot.plot(pen=pg.mkPen(RED,   width=2), name="Post")
-        self._pain_plot.addLegend()
+        self._pain_plot.addLegend(
+            offset=(10, 10), brush=pg.mkBrush(SURFACE2 + "ee"),
+            pen=pg.mkPen(BORDER)
+        )
+        self._pain_pre_curve  = self._pain_plot.plot(pen=pg.mkPen(AMBER, width=2), name="Pre-session")
+        self._pain_post_curve = self._pain_plot.plot(pen=pg.mkPen(RED,   width=2), name="Post-session")
         lay.addWidget(self._pain_plot, stretch=1)
         return w
 
@@ -254,7 +289,7 @@ class AnalyticsPanel(QWidget):
             rows = con.execute(
                 "SELECT id,date,exercise,duration_s,reps,"
                 "max_flex,max_abd,max_ext_rot,max_elbow,"
-                "pain_pre,pain_post,csv_file FROM sessions ORDER BY id"
+                "pain_pre,pain_post FROM sessions ORDER BY id"
             ).fetchall()
             con.close()
         except Exception as e:
@@ -266,7 +301,7 @@ class AnalyticsPanel(QWidget):
             writer.writerow([
                 "Session#", "Date", "Exercise", "Duration(s)", "Reps",
                 "MaxFlex(deg)", "MaxAbd(deg)", "MaxExtRot(deg)", "MaxElbow(deg)",
-                "PainPre(0-10)", "PainPost(0-10)", "CSVFile"
+                "PainPre(0-10)", "PainPost(0-10)"
             ])
             for r in rows:
                 writer.writerow(r)
@@ -357,16 +392,14 @@ class AnalyticsPanel(QWidget):
         # Show a note if every value is zero (sessions recorded without live sensors)
         all_zero = all(v == 0.0 for v in flexs + abds + rots + elbows)
         if not hasattr(self, "_trend_zero_lbl"):
-            from pyqtgraph import TextItem
             self._trend_zero_lbl = pg.TextItem(
                 "No angle data — sessions were recorded without live sensors",
                 color=AMBER, anchor=(0.5, 0.5)
             )
-            self._trend_plot.addItem(self._trend_zero_lbl)
+            self._shoulder_plot.addItem(self._trend_zero_lbl)
         self._trend_zero_lbl.setVisible(all_zero)
         if all_zero and xs:
-            mid_x = xs[len(xs) // 2]
-            self._trend_zero_lbl.setPos(mid_x, 5)
+            self._trend_zero_lbl.setPos(xs[len(xs) // 2], 5)
 
         # Pain chart
         pains_pre  = [r[9]  or 0 for r in sessions_chron]
@@ -377,15 +410,27 @@ class AnalyticsPanel(QWidget):
         # History table
         self._table.setRowCount(len(sessions))
         for i, r in enumerate(sessions):
+            # r: 0=id,1=date,2=exercise,3=duration_s,4=reps,
+            #    5=max_flex,6=max_abd,7=max_ext_rot,8=max_elbow,9=pain_pre,10=pain_post
+            raw_date = r[1] or ""
+            try:
+                dt = datetime.fromisoformat(raw_date)
+                date_str = dt.strftime("%Y-%m-%d  %H:%M")
+            except Exception:
+                date_str = raw_date[:16]
+            def _ang(v):
+                return f"{v:.0f}°" if v else "—"
             vals = [
                 str(r[0]),
-                (r[1] or "")[:16],
+                date_str,
                 r[2] or "—",
                 f"{r[3]:.0f}s" if r[3] else "—",
                 str(r[4]) if r[4] is not None else "—",
-                f"{r[5]:.0f}°" if r[5] else "—",
-                f"{r[6]:.0f}°" if r[6] else "—",
-                "—",
+                _ang(r[5]),
+                _ang(r[6]),
+                _ang(r[7]),
+                _ang(r[8]),
+                f"{r[9]}/10"  if r[9]  is not None else "—",
                 f"{r[10]}/10" if r[10] is not None else "—",
             ]
             for j, v in enumerate(vals):

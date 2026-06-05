@@ -134,7 +134,9 @@ class MainWindow(QMainWindow):
         self._angles   = angle_processor
         self._recorder = SessionRecorder()
         self._repdet   = RepDetector()
-        self._last_haptic_t  = 0.0
+        self._last_haptic_t       = 0.0
+        self._last_deviation_t    = 0.0   # separate cooldown for deviation haptics
+        self._hold_drop_since     = None  # hysteresis timer for hold dropout
         self._recording      = False
         self._active_ex: ExerciseDef | None = None   # set at session start
         self._session_sets   = 3
@@ -248,6 +250,7 @@ class MainWindow(QMainWindow):
         self._session_panel.goal_achieved.connect(self._on_goal_achieved)
         self._connect_panel.calibrate_requested.connect(self._on_calibrate)
         self._connect_panel.rom_completed.connect(self._on_rom_completed)
+        self._cal.set_complete_callback(self._on_calibration_complete)
 
         return self._stack
 
@@ -309,48 +312,83 @@ class MainWindow(QMainWindow):
             if not ex.is_hold_exercise:
                 if self._repdet.update(flex, abd, rot, elbow, now, trunk_lean):
                     self._session_set_reps_done += 1
+                    self._recorder.increment_reps()
                     with self._state.lock:
                         self._state.session_reps = self._repdet.count
-                    self._trigger_haptic(now, "Rep complete", CMD_HAPTIC_REP)
+                        hap_rep = self._state.haptic_rep
                     # ── Set completion check ──────────────────────────────────
-                    if (self._session_reps > 0 and
-                            self._session_set_reps_done >= self._session_reps and
-                            not self._session_panel._resting):
+                    set_done = (self._session_reps > 0 and
+                                self._session_set_reps_done >= self._session_reps and
+                                not self._session_panel._resting)
+                    if set_done:
                         self._session_set_reps_done = 0
+                        self._trigger_haptic(now, "Set complete — rest", CMD_HAPTIC_REST_END)
                         self._session_panel.notify_set_complete()
+                    elif hap_rep:
+                        self._trigger_haptic(now, "Rep complete", CMD_HAPTIC_REP)
 
             # ── Hold detection ────────────────────────────────────────────────
+            # Uses the maximum of all angles as the activity signal.
+            # This is intentional: hold exercises (cross-body, towel) produce
+            # movement in whichever plane the anatomy allows, not necessarily
+            # the smooth_angle. Any single angle ≥ 5° means the arm is engaged.
+            # Hysteresis: the timer only resets after the arm has been below
+            # threshold for _HOLD_DROP_S seconds, so brief wobbles don't kill
+            # the progress bar.
             else:
-                # Use the primary tracked angle to determine hold state
-                angle_map = {"flexion": flex, "abduction": abd,
-                             "ext_rot": rot, "elbow": elbow}
-                hold_val = abs(angle_map.get(ex.smooth_angle, flex))
-                # Arm must be at ≥ 50% of the enter threshold to count as holding
-                if hold_val >= ex.rep_enter_deg * 0.5:
+                hold_activity = max(abs(flex), abs(abd), abs(rot), abs(elbow))
+                if hold_activity >= 5.0:
+                    self._hold_drop_since = None      # arm is up — clear dropout timer
                     if not self._repdet._hold_start:
                         self._repdet.start_hold()
                     if self._repdet.hold_complete:
+                        self._recorder.increment_reps()
                         with self._state.lock:
                             self._state.session_reps += 1
-                        self._trigger_haptic(now, "Hold complete", CMD_HAPTIC_HOLD)
+                            hap_hold = self._state.haptic_hold
+                        if hap_hold:
+                            self._trigger_haptic(now, "Hold complete", CMD_HAPTIC_HOLD)
                         self._repdet.cancel_hold()
                 else:
-                    self._repdet.cancel_hold()
+                    # Arm has dropped — start dropout timer if not already running
+                    if self._hold_drop_since is None:
+                        self._hold_drop_since = now
+                    elif now - self._hold_drop_since >= 1.0:
+                        # Below threshold for 1 full second — cancel the hold
+                        self._repdet.cancel_hold()
+                        self._hold_drop_since = None
 
             # ── ROM boundary haptic ───────────────────────────────────────────
-            if (abs(flex) >= HAPTIC_ROM_FRACTION * rom_flex or
-                    abs(abd) >= HAPTIC_ROM_FRACTION * rom_abd):
+            with self._state.lock:
+                rom_goal_frac  = self._state.rom_goal_fraction
+                trunk_limit    = self._state.trunk_lean_limit
+                hap_rom        = self._state.haptic_rom
+                hap_dev        = self._state.haptic_deviation
+                hap_trunk      = self._state.haptic_trunk
+            if hap_rom and (abs(flex) >= rom_goal_frac * rom_flex or
+                    abs(abd) >= rom_goal_frac * rom_abd):
                 self._trigger_haptic(now, "ROM limit reached", CMD_HAPTIC_ROM)
 
             # ── Form deviation haptic (from ExerciseDef, not string matching) ─
-            if abs(flex) > 20 or abs(abd) > 20:   # only check when arm is raised
+            # Only fires when the arm is back near neutral (elevation < 25°) so
+            # it does not interrupt a rep mid-way and trigger the haptic lockout.
+            # plane_elev: 0° = pure abduction (frontal), 90° = pure flexion (sagittal).
+            elevation_deg = max(abs(flex), abs(abd))
+            if hap_dev and elevation_deg < 25 and ex.expected_plane is not None:
+                deviation = False
+                reason    = ""
                 if ex.expected_plane == "sagittal" and plane < 30:
-                    self._trigger_haptic(now, "Deviation: move forward", CMD_HAPTIC_DEVIATION)
+                    deviation = True
+                    reason    = "Deviation: raise forward"
                 elif ex.expected_plane == "frontal" and plane > 60:
-                    self._trigger_haptic(now, "Deviation: move sideways", CMD_HAPTIC_DEVIATION)
+                    deviation = True
+                    reason    = "Deviation: raise sideways"
+                if deviation and now - self._last_deviation_t > 3.0:
+                    self._last_deviation_t = now
+                    self._trigger_haptic(now, reason, CMD_HAPTIC_DEVIATION)
 
             # ── Trunk lean haptic ─────────────────────────────────────────────
-            if ex.check_trunk_lean and trunk_lean > TRUNK_LEAN_LIMIT:
+            if hap_trunk and ex.check_trunk_lean and trunk_lean > trunk_limit:
                 self._trigger_haptic(now, f"Trunk lean {trunk_lean:.0f}° — stand straight", CMD_HAPTIC_DEVIATION)
 
         # CSV recording
@@ -388,18 +426,27 @@ class MainWindow(QMainWindow):
     def _on_calibrate(self):
         ok = self._cal.capture()
         if ok:
+            # Haptic at START of calibration (button press feedback)
             self._ble.send_haptic_all(CMD_HAPTIC_CALIBRATED)
         else:
             print("[MAIN] Calibration failed — check connections.")
+
+    def _on_calibration_complete(self):
+        """Called from the Calibration background thread when capture finishes."""
+        # CMD_HAPTIC_CALIBRATED is a Double Click — distinctive enough for both
+        # start and end. Fire it again so the user knows capture is done.
+        self._ble.send_haptic_all(CMD_HAPTIC_CALIBRATED)
 
     def _on_start_session(self, exercise: str, pain_pre: int, sets: int, reps: int):
         self._active_ex = get_exercise(exercise)
         self._session_sets  = sets
         self._session_reps  = reps
         self._session_set_reps_done = 0
+        self._hold_drop_since       = None
         self._repdet.reset()
         self._repdet.set_exercise(self._active_ex)
         self._recorder.start_session(exercise=exercise, pain_pre=pain_pre)
+        self._recording = True          # auto-record every session for ROM/angle data
         with self._state.lock:
             self._state.session_active   = True
             self._state.session_reps     = 0
@@ -409,13 +456,14 @@ class MainWindow(QMainWindow):
         self._ble.send_haptic_all(CMD_HAPTIC_SESSION)
 
     def _on_session_ended(self, pain_post: int):
+        # Stop frame capture first so record_frame has been called right up to
+        # this point, then end_session sees fully populated max-angle accumulators.
+        self._recording = False
+        self._session_panel.stop_recording()
         self._recorder.end_session(pain_post=pain_post)
         with self._state.lock:
             self._state.session_active = False
         self._active_ex = None
-        if self._recording:
-            self._recording = False
-            self._session_panel.stop_recording()
         self._navigate(3)
 
     def _on_goal_achieved(self):
