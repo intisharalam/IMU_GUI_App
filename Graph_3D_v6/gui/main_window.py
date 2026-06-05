@@ -246,6 +246,7 @@ class MainWindow(QMainWindow):
 
         self._exercise_panel.start_session_requested.connect(self._on_start_session)
         self._session_panel.session_ended.connect(self._on_session_ended)
+        self._session_panel.session_cancelled.connect(self._on_session_cancelled)
         self._session_panel.record_toggled.connect(self._on_record_toggled)
         self._session_panel.goal_achieved.connect(self._on_goal_achieved)
         self._connect_panel.calibrate_requested.connect(self._on_calibrate)
@@ -328,33 +329,56 @@ class MainWindow(QMainWindow):
                         self._trigger_haptic(now, "Rep complete", CMD_HAPTIC_REP)
 
             # ── Hold detection ────────────────────────────────────────────────
-            # Uses the maximum of all angles as the activity signal.
-            # This is intentional: hold exercises (cross-body, towel) produce
-            # movement in whichever plane the anatomy allows, not necessarily
-            # the smooth_angle. Any single angle ≥ 5° means the arm is engaged.
-            # Hysteresis: the timer only resets after the arm has been below
-            # threshold for _HOLD_DROP_S seconds, so brief wobbles don't kill
-            # the progress bar.
+            # Activity signal: use the exercise's smooth_angle so we respond to
+            # the specific motion rather than noisy ext_rot or elbow drift.
+            # Dropout hysteresis: 2 seconds below threshold before cancelling,
+            # so a brief wobble doesn't reset the progress bar mid-hold.
             else:
-                hold_activity = max(abs(flex), abs(abd), abs(rot), abs(elbow))
-                if hold_activity >= 5.0:
-                    self._hold_drop_since = None      # arm is up — clear dropout timer
+                angle_map = {
+                    "flexion":   abs(flex),
+                    "abduction": abs(abd),
+                    "ext_rot":   abs(rot),
+                    "elbow":     abs(elbow),
+                }
+                hold_activity = angle_map.get(ex.smooth_angle, abs(abd))
+                ARM_THRESHOLD = 8.0   # degrees — arm must be raised this much
+
+                if hold_activity >= ARM_THRESHOLD:
+                    self._hold_drop_since = None   # arm is up — clear dropout timer
+
                     if not self._repdet._hold_start:
                         self._repdet.start_hold()
+
                     if self._repdet.hold_complete:
+                        # Hold finished — count it
+                        self._session_set_reps_done += 1
                         self._recorder.increment_reps()
                         with self._state.lock:
                             self._state.session_reps += 1
                             hap_hold = self._state.haptic_hold
                         if hap_hold:
                             self._trigger_haptic(now, "Hold complete", CMD_HAPTIC_HOLD)
-                        self._repdet.cancel_hold()
+                        # completed=True sets wait-for-drop so next hold only begins
+                        # after the arm lowers, not immediately on the next tick.
+                        self._repdet.cancel_hold(completed=True)
+
+                        # Set completion — same logic as rep exercises
+                        set_done = (self._session_reps > 0 and
+                                    self._session_set_reps_done >= self._session_reps and
+                                    not self._session_panel._resting)
+                        if set_done:
+                            self._session_set_reps_done = 0
+                            self._trigger_haptic(now, "Set complete — rest",
+                                                 CMD_HAPTIC_REST_END)
+                            self._session_panel.notify_set_complete()
+
                 else:
                     # Arm has dropped — start dropout timer if not already running
+                    self._repdet.notify_arm_dropped()   # clear wait-for-drop guard
                     if self._hold_drop_since is None:
                         self._hold_drop_since = now
-                    elif now - self._hold_drop_since >= 1.0:
-                        # Below threshold for 1 full second — cancel the hold
+                    elif now - self._hold_drop_since >= 2.0:
+                        # Below threshold for 2 full seconds — cancel the hold
                         self._repdet.cancel_hold()
                         self._hold_drop_since = None
 
@@ -440,13 +464,20 @@ class MainWindow(QMainWindow):
     def _on_start_session(self, exercise: str, pain_pre: int, sets: int, reps: int):
         self._active_ex = get_exercise(exercise)
         self._session_sets  = sets
-        self._session_reps  = reps
         self._session_set_reps_done = 0
         self._hold_drop_since       = None
         self._repdet.reset()
         self._repdet.set_exercise(self._active_ex)
+
+        if self._active_ex is not None and self._active_ex.is_hold_exercise:
+            # reps carries hold duration in seconds — store separately
+            self._repdet.set_hold_duration(reps)
+            self._session_reps = 1          # 1 completed hold = 1 set done
+        else:
+            self._session_reps = reps       # normal rep target per set
+
         self._recorder.start_session(exercise=exercise, pain_pre=pain_pre)
-        self._recording = True          # auto-record every session for ROM/angle data
+        self._recording = True
         with self._state.lock:
             self._state.session_active   = True
             self._state.session_reps     = 0
@@ -465,6 +496,17 @@ class MainWindow(QMainWindow):
             self._state.session_active = False
         self._active_ex = None
         self._navigate(3)
+
+    def _on_session_cancelled(self):
+        """Pain dialog was dismissed — session ended prematurely, discard all data."""
+        self._recording = False
+        self._session_panel.stop_recording()
+        # Discard CSV and don't write to SQLite
+        self._recorder._discard()
+        with self._state.lock:
+            self._state.session_active = False
+        self._active_ex = None
+        self._navigate(1)   # back to exercise panel, not analytics
 
     def _on_goal_achieved(self):
         self._trigger_haptic(time.monotonic(), "Goal reached!", CMD_HAPTIC_SESSION)

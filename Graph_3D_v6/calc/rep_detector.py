@@ -77,6 +77,7 @@ class RepDetector:
         self._above     = False
         self._prev      = None
         self._hold_start = None
+        self._hold_duration_override = None   # cleared on each new exercise
 
         if ex is None:
             self._angle_key = "flexion"
@@ -96,6 +97,11 @@ class RepDetector:
             f"enter={self._enter}°  exit={self._exit}°"
         )
 
+    def set_hold_duration(self, seconds: float) -> None:
+        """Override the hold target duration (user-adjusted value from exercise panel)."""
+        self._hold_duration_override = max(1.0, float(seconds))
+        print(f"[REP] Hold duration override → {self._hold_duration_override:.0f}s")
+
     def reset(self) -> None:
         """Reset counters and state (call at session start)."""
         self._reps        = 0
@@ -103,6 +109,7 @@ class RepDetector:
         self._prev        = None
         self._last_rep_t  = 0.0
         self._hold_start  = None
+        self._hold_wait_for_drop = False
         self._haptic_t    = 0.0
         self._above_since = None
 
@@ -206,11 +213,20 @@ class RepDetector:
 
     def start_hold(self) -> None:
         """Call when the user begins holding the stretch position."""
+        if getattr(self, "_hold_wait_for_drop", False):
+            return   # don't restart until arm has dropped
         self._hold_start = time.monotonic()
 
-    def cancel_hold(self) -> None:
-        """Call if the arm drops before the hold is complete."""
+    def cancel_hold(self, completed: bool = False) -> None:
+        """Cancel the current hold timer.
+        Pass completed=True when the hold finished successfully — this sets a
+        'wait for drop' flag so the next hold only starts after the arm lowers."""
         self._hold_start = None
+        self._hold_wait_for_drop = completed
+
+    def notify_arm_dropped(self) -> None:
+        """Call when the arm goes below the activity threshold to clear the drop guard."""
+        self._hold_wait_for_drop = False
 
     @property
     def hold_elapsed(self) -> float:
@@ -220,11 +236,21 @@ class RepDetector:
         return time.monotonic() - self._hold_start
 
     @property
+    def hold_target_s(self) -> float:
+        """Effective hold target — user override if set, else ExerciseDef default."""
+        override = getattr(self, "_hold_duration_override", None)
+        if override is not None:
+            return override
+        if self._ex is not None:
+            return self._ex.hold_duration_s
+        return 1.0
+
+    @property
     def hold_progress(self) -> float:
         """0.0 → 1.0 fraction of the target hold duration completed."""
         if self._ex is None or not self._ex.is_hold_exercise:
             return 0.0
-        target = self._ex.hold_duration_s
+        target = self.hold_target_s
         if target <= 0:
             return 0.0
         return min(1.0, self.hold_elapsed / target)

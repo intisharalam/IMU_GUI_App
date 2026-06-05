@@ -227,9 +227,10 @@ class RestOverlay(QWidget):
 # ── Main panel ────────────────────────────────────────────────────────────────
 
 class SessionPanel(QWidget):
-    session_ended  = pyqtSignal(int)
-    record_toggled = pyqtSignal(bool)
-    goal_achieved  = pyqtSignal()
+    session_ended     = pyqtSignal(int)
+    session_cancelled = pyqtSignal()   # pain dialog dismissed — discard data
+    record_toggled    = pyqtSignal(bool)
+    goal_achieved     = pyqtSignal()
 
     def __init__(self, state, ble, calibration, recorder, rep_detector, parent=None):
         super().__init__(parent)
@@ -324,7 +325,12 @@ class SessionPanel(QWidget):
         self._hold_bar.setFixedHeight(12)
         self._hold_bar.hideAxis('left'); self._hold_bar.hideAxis('bottom')
         self._hold_bar.setMouseEnabled(x=False, y=False); self._hold_bar.hideButtons()
-        self._hold_curve = self._hold_bar.plot(pen=pg.mkPen(CYAN, width=2))
+        self._hold_bar.setXRange(0, 1, padding=0)
+        self._hold_bar.setYRange(-1, 1, padding=0)
+        self._hold_curve = self._hold_bar.plot(
+            x=[0, 0], y=[0, 0],
+            pen=pg.mkPen(CYAN, width=10)
+        )
         self._hold_lbl = QLabel("HOLD — 0.0 s")
         self._hold_lbl.setStyleSheet(label_style(CYAN, 12))
 
@@ -505,7 +511,7 @@ class SessionPanel(QWidget):
         self._hold_bar.setVisible(is_hold)
         self._hold_lbl.setVisible(is_hold)
         if is_hold:
-            self._hold_curve.setData([0.0])
+            self._hold_curve.setData(x=[0, 0], y=[0, 0])
             self._hold_lbl.setText("HOLD — 0.0 s")
 
     def update_goal_sphere(self):
@@ -588,12 +594,11 @@ class SessionPanel(QWidget):
 
         ex = self._current_ex
         if ex is not None and ex.is_hold_exercise:
-            prog = self._repdet.hold_progress
-            hold_data = [prog * 100]
-            self._hold_curve.setData(hold_data)
+            prog = self._repdet.hold_progress   # 0.0 → 1.0
+            self._hold_curve.setData(x=[0, prog], y=[0, 0])
             self._hold_lbl.setText(
                 f"HOLD — {self._repdet.hold_elapsed:.1f} s"
-                f" / {ex.hold_duration_s:.0f} s"
+                f" / {self._reps_total:.0f} s"
             )
         else:
             # Show reps in current set only (reps resets at set boundary in main_window)
@@ -676,8 +681,11 @@ class SessionPanel(QWidget):
     def _show_end_dialog(self):
         self._running = False   # freeze HUD now, right as dialog appears
         dlg = EndSessionDialog(self)
-        pain_post = dlg.pain if dlg.exec_() == QDialog.Accepted else 0
-        self.session_ended.emit(pain_post)
+        if dlg.exec_() == QDialog.Accepted:
+            self.session_ended.emit(dlg.pain)
+        else:
+            # User cancelled — treat as premature end, discard data
+            self.session_cancelled.emit()
 
     # ── User record / replay ─────────────────────────────────────────────────
 

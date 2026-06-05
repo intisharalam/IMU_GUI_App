@@ -103,7 +103,7 @@ class Toggle(QWidget):
             )
             self._lbl.setText("ON")
             self._lbl.setStyleSheet(
-                f"background:transparent;color:#ffffff;"
+                f"background:transparent;color:#000000;"
                 f"font-size:10px;font-weight:bold;"
             )
         else:
@@ -253,7 +253,11 @@ class _SideToggle(QWidget):
         self._apply(side)
 
     def _apply(self, side: str):
-        active   = btn_style(GREEN4, GREEN, GREEN3)
+        active = (
+            f"QPushButton{{background:{GREEN};color:#ffffff;border:1px solid {GREEN};"
+            f"border-radius:3px;padding:3px 10px;font-size:12px;font-weight:bold;}}"
+            f"QPushButton:hover{{background:{GREEN2};}}"
+        )
         inactive = btn_style(SURFACE2, TEXT3, BORDER)
         self._r.setStyleSheet(active   if side == "right" else inactive)
         self._l.setStyleSheet(inactive if side == "right" else active)
@@ -304,7 +308,10 @@ class SettingsPanel(QWidget):
 
         self._rom_lbl = QLabel("—")
         self._rom_lbl.setStyleSheet(label_style(GREEN, 11))
-        il.addWidget(_Row("MEASURED ROM", "From last ROM measurement", self._rom_lbl))
+        self._rom_lbl.setWordWrap(True)
+        rom_row = _Row("MEASURED ROM", "From last ROM measurement", self._rom_lbl)
+        rom_row.setFixedHeight(68)
+        il.addWidget(rom_row)
         il.addWidget(_Div())
 
         # ── Haptic Feedback ───────────────────────────────────────────────────
@@ -439,9 +446,15 @@ class SettingsPanel(QWidget):
         with self._state.lock:
             rf       = self._state.rom_flex_limit
             ra       = self._state.rom_abd_limit
+            rr       = self._state.rom_rot_limit
+            ri       = self._state.rom_int_rot_limit
+            re       = self._state.rom_elbow_limit
             measured = self._state.rom_measured
         if measured:
-            self._rom_lbl.setText(f"FLEX {rf:.0f}°   ABD {ra:.0f}°")
+            self._rom_lbl.setText(
+                f"FLEX {rf:.0f}°  ABD {ra:.0f}°  "
+                f"EXT ROT {rr:.0f}°  INT ROT {ri:.0f}°  ELBOW {re:.0f}°"
+            )
             self._rom_lbl.setStyleSheet(label_style(GREEN, 11))
         else:
             self._rom_lbl.setText("NOT MEASURED")

@@ -123,6 +123,21 @@ class SessionRecorder:
     def increment_reps(self):
         self._reps += 1
 
+    def _discard(self):
+        """Close and delete the in-progress CSV. Do not write to SQLite."""
+        if not self._active:
+            return
+        try:
+            self._csv_handle.close()
+            csv_path = Path(self._csv_handle.name)
+            if csv_path.exists():
+                csv_path.unlink()
+                print(f"[REC] Session discarded — {csv_path.name} deleted.")
+        except Exception as e:
+            print(f"[REC] Discard error: {e}")
+        finally:
+            self._active = False
+
     def end_session(self, pain_post: int = 0) -> dict:
         if not self._active:
             return {}

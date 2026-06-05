@@ -82,16 +82,29 @@ BACK  = np.array([-1,  0,  0], dtype=float)
 MOUNT_CHEST = _mount(sx=DOWN, sy=LEFT, sz=FWD)
 MOUNT_ARM   = _mount(sx=DOWN, sy=FWD,   sz=RIGHT)
 MOUNT_WRIST = _mount(sx=DOWN, sy=FWD,   sz=RIGHT)
+# Left arm: sensors are flipped 180° around the DOWN axis — FWD→BWD, RIGHT→LEFT
+MOUNT_ARM_LEFT   = _mount(sx=DOWN, sy=BACK, sz=LEFT)
+MOUNT_WRIST_LEFT = _mount(sx=DOWN, sy=BACK, sz=LEFT)
+
+# Default (right arm) — kept for backward-compat imports in render_widget etc.
 MOUNT = {"chest": MOUNT_CHEST, "arm": MOUNT_ARM, "wrist": MOUNT_WRIST}
+
+def get_mount(side: str) -> dict:
+    """Return the correct mount dict for 'right' or 'left' affected side."""
+    if side == "left":
+        return {"chest": MOUNT_CHEST, "arm": MOUNT_ARM_LEFT, "wrist": MOUNT_WRIST_LEFT}
+    return MOUNT
 
 
 def _to_rot(q_wxyz):
     w, x, y, z = q_wxyz
     return Rotation.from_quat([x, y, z, w])
 
-def to_anatomical(q_wxyz, sensor_name: str) -> Rotation:
-    """Raw sensor quaternion → shared anatomical frame. MOUNT applied once."""
-    return _to_rot(q_wxyz) * MOUNT[sensor_name].inv()
+def to_anatomical(q_wxyz, sensor_name: str, mount: dict | None = None) -> Rotation:
+    """Raw sensor quaternion → shared anatomical frame. MOUNT applied once.
+    Pass a mount dict (from get_mount()) to use the correct side; defaults to right."""
+    m = mount if mount is not None else MOUNT
+    return _to_rot(q_wxyz) * m[sensor_name].inv()
 
 
 def swing_twist(rot: Rotation, twist_axis: np.ndarray):
@@ -120,7 +133,8 @@ def swing_twist(rot: Rotation, twist_axis: np.ndarray):
 
 def angles_from_direction(upper_dir_anat: np.ndarray,
                            fore_dir_anat:  np.ndarray,
-                           shoulder_rot:   Rotation) -> dict:
+                           shoulder_rot:   Rotation,
+                           side: str = "right") -> dict:
     """
     Derive all joint angles from the arm segment direction vectors.
     This is the same geometric computation the renderer uses, so the
@@ -133,6 +147,8 @@ def angles_from_direction(upper_dir_anat: np.ndarray,
     fore_dir_anat  : (3,) unit vector — direction of forearm in anatomical
                      frame (after (shoulder_rot * elbow_rot) applied to DOWN).
     shoulder_rot   : Rotation — used only for external rotation extraction.
+    side           : "right" | "left" — left arm mount mirrors X (FORWARD axis),
+                     so we negate u[0] before plane classification.
 
     Returns dict with all angles in degrees.
     """
@@ -150,15 +166,16 @@ def angles_from_direction(upper_dir_anat: np.ndarray,
     # In our anatomical frame:
     #   +X = FORWARD  → sagittal plane raise = flexion
     #   +Z = RIGHT    → frontal plane raise  = abduction
-    # (Y is vertical so we ignore it for plane classification)
-    horiz = np.array([u[0], 0.0, u[2]])   # forward and lateral components
-    horiz_len = np.linalg.norm(horiz)
+    # For left arm the mount mirrors X so forward motion → u[0] < 0.
+    # We correct for that by negating u[0] before plane classification.
+    fwd_component = -u[0] if side == "left" else u[0]
+    horiz_len = np.sqrt(fwd_component**2 + u[2]**2)
 
     if horiz_len > 0.01:
         # plane_elev: angle between horizontal projection and the Z axis (RIGHT)
         # = 0° → arm going purely sideways (abduction)
         # = 90° → arm going purely forward (flexion)
-        plane_elev = np.degrees(np.arctan2(abs(u[0]), abs(u[2])))
+        plane_elev = np.degrees(np.arctan2(abs(fwd_component), abs(u[2])))
     else:
         plane_elev = 0.0   # arm is straight up/down, plane undefined
 
@@ -224,11 +241,13 @@ class JointAngles:
             "external_rotation": 0.0, "elbow_flexion": 0.0,
         }
 
-    def set_calibration(self, ref_quats: dict):
+    def set_calibration(self, ref_quats: dict, mount: dict, side: str = "right"):
         for f in self._filters.values(): f.reset()
-        self._ref_anat = {n: to_anatomical(q, n) for n, q in ref_quats.items()}
+        self._mount = mount
+        self._side  = side
+        self._ref_anat = {n: to_anatomical(q, n, mount) for n, q in ref_quats.items()}
         self._prev = {k: 0.0 for k in self._prev}
-        print("[ANGLES] Calibration loaded. Filters reset.")
+        print(f"[ANGLES] Calibration loaded. Filters reset. Side={side}")
 
     def compute(self, live_quats: dict) -> dict:
         ZERO = dict(
@@ -238,9 +257,10 @@ class JointAngles:
             _shoulder_rot=Rotation.identity(), _elbow_rot=Rotation.identity()
         )
         if not self._ref_anat: return ZERO
+        mount = getattr(self, "_mount", MOUNT)
 
         # Step 1 — filter + mount (identical to renderer)
-        live_anat = {n: self._filters[n].update(q) * MOUNT[n].inv()
+        live_anat = {n: self._filters[n].update(q) * mount[n].inv()
                      for n, q in live_quats.items()}
 
         # Step 2 — remove I-pose offset (identical to renderer)
@@ -260,7 +280,8 @@ class JointAngles:
         fore_dir  = (shoulder_rot * elbow_rot).apply(DOWN)          # unit forearm
 
         # Step 5 — compute all angles from direction vectors
-        result = angles_from_direction(upper_dir, fore_dir, shoulder_rot)
+        result = angles_from_direction(upper_dir, fore_dir, shoulder_rot,
+                                       side=getattr(self, "_side", "right"))
         result["_shoulder_rot"] = shoulder_rot
         result["_elbow_rot"]    = elbow_rot
 
@@ -276,22 +297,28 @@ class JointAngles:
 
 
 class AngleProcessor:
-    """Called every frame. Detects recalibration by dict identity."""
+    """Called every frame. Detects recalibration by dict identity or side change."""
     def __init__(self, state, calibration):
         self._state       = state
         self._calibration = calibration
         self._angles      = JointAngles()
         self._last_cal_id = None
+        self._last_side   = None
 
     def update(self, timestamp: float):
         with self._state.lock:
             calibrated = self._state.calibrated
             cal_id     = id(self._state.calibration_quats)
             cal_quats  = dict(self._state.calibration_quats) if calibrated else {}
+            side       = self._state.affected_side
 
-        if calibrated and cal_id != self._last_cal_id:
-            self._angles.set_calibration(cal_quats)
+        mount = get_mount(side)
+
+        # Recalibrate if quaternion dict changed OR affected side changed
+        if calibrated and (cal_id != self._last_cal_id or side != self._last_side):
+            self._angles.set_calibration(cal_quats, mount, side)
             self._last_cal_id = cal_id
+            self._last_side   = side
 
         if not calibrated or self._last_cal_id is None:
             return
@@ -305,12 +332,11 @@ class AngleProcessor:
         # Extract trunk lean from corrected chest rotation
         # Chest roll = lateral tilt = compensatory movement indicator
         try:
-            from calc.joint_angles import to_anatomical, MOUNT
             q_chest = live_quats["chest"]
             with self._state.lock:
                 q_ref_chest = self._state.calibration_quats.get("chest", (1,0,0,0))
-            live_c = to_anatomical(q_chest, "chest")
-            ref_c  = to_anatomical(q_ref_chest, "chest")
+            live_c = to_anatomical(q_chest, "chest", mount)
+            ref_c  = to_anatomical(q_ref_chest, "chest", mount)
             corr_c = ref_c.inv() * live_c
             trunk_euler = corr_c.as_euler("XYZ", degrees=True)
             trunk_lean  = float(abs(trunk_euler[2]))   # lateral roll

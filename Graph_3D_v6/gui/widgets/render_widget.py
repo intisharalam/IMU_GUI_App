@@ -65,7 +65,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButt
 from PyQt5.QtGui import QVector3D
 from PyQt5.QtCore import pyqtSignal
 
-from calc.joint_angles import MOUNT, to_anatomical, QuaternionFilter
+from calc.joint_angles import MOUNT, get_mount, to_anatomical, QuaternionFilter
 from gui.widgets.exercise_guide import ExerciseGuide
 
 UPPER_ARM_LEN = 0.30
@@ -214,6 +214,8 @@ class RenderWidget(QWidget):
         self._playing         = False
         self._recording_geom  = False
         self._geom_buf        = []
+        self._current_side    = "right"   # tracks last-built side geometry
+        self._phantom_arm_items = []       # removable phantom arm GL items
         # Guide playback — stops after 2 patient reps detected
         self._guide_rep_target   = 2
         self._guide_reps_seen    = 0
@@ -281,38 +283,31 @@ class RenderWidget(QWidget):
             (_r((0,   0.1, 0)), (  0, 255,   0, 255)),
             (_r((0,   0, 0.1)), (  0,   0, 255, 255)),
         ]:
-            # Coordinate axes — thinner and more subtle
             arrow = gl.GLLinePlotItem(
                 pos=np.array([[0,0,0], vec]),
                 color=color, width=1.5, antialias=True
             )
             self._view.addItem(arrow)
 
-        # Phantom body
-        self._build_phantom_body()
+        # Static phantom body (torso, head, neck, pelvis, legs — never change)
+        self._build_phantom_static()
 
-        # Shoulder — _r() rotates the position into the new frame
-        self._shoulder_pos = _r([-0.16, 0.38, 0.0])
-
+        # Live arm joint spheres — positioned by _rebuild_side_geometry
         self._sph_shoulder = _sphere_mesh(0.040); self._sph_shoulder.setColor(C_SHOULDER)
         self._sph_elbow    = _sphere_mesh(0.033); self._sph_elbow.setColor(C_ELBOW)
         self._sph_wrist    = _sphere_mesh(0.027); self._sph_wrist.setColor(C_WRIST)
         for s in [self._sph_shoulder, self._sph_elbow, self._sph_wrist]:
             self._view.addItem(s)
-        self._sph_shoulder.translate(*self._shoulder_pos)
-
-        elbow0 = self._shoulder_pos + np.array([0, -UPPER_ARM_LEN, 0])
-        wrist0 = elbow0 + np.array([0, -FOREARM_LEN, 0])
-        self._sph_elbow.translate(*elbow0)
-        self._sph_wrist.translate(*wrist0)
 
         self._upper_mesh = self._fore_mesh = None
-        self._rebuild_bones(elbow0, wrist0)
 
-    def _build_phantom_body(self):
+        # Build initial side geometry (right by default)
+        self._rebuild_side_geometry("right")
+
+    def _build_phantom_static(self):
         """
-        Static grey body reference. All positions passed through _r() to apply
-        the -45° Y rotation before placement in GL space.
+        Static grey body reference — parts that never change regardless of side.
+        Head, neck, torso, pelvis, legs.
         """
         def _add(mesh, colour=C_PHANTOM):
             mesh.setColor(colour)
@@ -329,7 +324,6 @@ class RenderWidget(QWidget):
         _add(neck)
 
         # Torso
-        # torso = _box_mesh(0.26, 0.48, 0.16)
         torso = _torso_mesh()
         torso.setColor(C_PHANTOM)
         torso.setGLOptions('translucent')
@@ -342,22 +336,71 @@ class RenderWidget(QWidget):
         pelvis.translate(*_r([0, -0.16, 0]))
         _add(pelvis)
 
-        # Left arm (phantom)
-        l_shoulder = _r([0.15, 0.38, 0.0])
-        l_elbow    = _r([0.15, 0.10, 0.0])
-        l_wrist    = _r([0.15, -0.12, 0.0])
-        _add(_cylinder_mesh(l_shoulder, l_elbow, 0.025))
-        _add(_cylinder_mesh(l_elbow,    l_wrist, 0.020))
-        ls = _sphere_mesh(0.038); ls.translate(*l_shoulder); _add(ls)
-        le = _sphere_mesh(0.030); le.translate(*l_elbow);    _add(le)
-        lw = _sphere_mesh(0.025); lw.translate(*l_wrist);    _add(lw)
-
         # Upper legs
         for sx in [0.08, -0.08]:
             hip  = _r([sx, -0.22, 0.0])
             knee = _r([sx, -0.60, 0.0])
             _add(_cylinder_mesh(hip, knee, 0.040))
             kn = _sphere_mesh(0.042); kn.translate(*knee); _add(kn)
+
+    def _rebuild_side_geometry(self, side: str):
+        """
+        Swap the live shoulder position and phantom opposite arm to match
+        the selected affected side.
+
+          right: live arm at -X (screen left = patient's right from front),
+                 phantom arm at +X
+          left:  live arm at +X (screen right = patient's left from front),
+                 phantom arm at -X
+        """
+        # Remove old phantom arm items
+        for item in self._phantom_arm_items:
+            self._view.removeItem(item)
+        self._phantom_arm_items.clear()
+
+        def _add_phantom(mesh):
+            mesh.setColor(C_PHANTOM)
+            mesh.setGLOptions('translucent')
+            self._view.addItem(mesh)
+            self._phantom_arm_items.append(mesh)
+
+        if side == "left":
+            live_x    = +0.16   # live arm on screen right (patient's left)
+            phantom_x = -0.15   # phantom on screen left (patient's right)
+        else:
+            live_x    = -0.16   # live arm on screen left (patient's right)
+            phantom_x = +0.15   # phantom on screen right (patient's left)
+
+        # Live shoulder sphere — reposition
+        self._shoulder_pos = _r([live_x, 0.38, 0.0])
+        self._sph_shoulder.resetTransform()
+        self._sph_shoulder.translate(*self._shoulder_pos)
+
+        elbow0 = self._shoulder_pos + np.array([0, -UPPER_ARM_LEN, 0])
+        wrist0 = elbow0 + np.array([0, -FOREARM_LEN, 0])
+        self._sph_elbow.resetTransform(); self._sph_elbow.translate(*elbow0)
+        self._sph_wrist.resetTransform(); self._sph_wrist.translate(*wrist0)
+        self._rebuild_bones(elbow0, wrist0)
+
+        # Phantom opposite arm
+        p_shoulder = _r([phantom_x, 0.38, 0.0])
+        p_elbow    = _r([phantom_x, 0.10, 0.0])
+        p_wrist    = _r([phantom_x, -0.12, 0.0])
+        _add_phantom(_cylinder_mesh(p_shoulder, p_elbow, 0.025))
+        _add_phantom(_cylinder_mesh(p_elbow,    p_wrist, 0.020))
+        ps = _sphere_mesh(0.038); ps.translate(*p_shoulder); _add_phantom(ps)
+        pe = _sphere_mesh(0.030); pe.translate(*p_elbow);    _add_phantom(pe)
+        pw = _sphere_mesh(0.025); pw.translate(*p_wrist);    _add_phantom(pw)
+
+        # Reset prev vectors so jump-gate doesn't fire on side switch
+        self._prev_upper = np.array([0., -UPPER_ARM_LEN, 0.])
+        self._prev_fore  = np.array([0., -FOREARM_LEN,   0.])
+        self._current_side = side
+
+    def _build_phantom_body(self):
+        """Kept for compat — delegates to the two split methods."""
+        self._build_phantom_static()
+        self._rebuild_side_geometry(self._current_side)
 
     def _rebuild_bones(self, elbow, wrist):
         for attr in ["_upper_mesh", "_fore_mesh"]:
@@ -483,6 +526,7 @@ class RenderWidget(QWidget):
             abd   = self._state.shoulder_abduction
             rot   = self._state.external_rotation
             elbow = self._state.elbow_flexion
+            side  = self._state.affected_side
 
             cal_id = id(self._state.calibration_quats) if calibrated else 0
             if not hasattr(self, '_last_cal_id_render'):
@@ -492,15 +536,21 @@ class RenderWidget(QWidget):
                 self._prev_upper = np.array([0., -UPPER_ARM_LEN, 0.])
                 self._prev_fore  = np.array([0., -FOREARM_LEN,   0.])
 
+        mount = get_mount(side)
+
+        # Rebuild geometry if side has changed since last tick
+        if side != self._current_side:
+            self._rebuild_side_geometry(side)
+
         if self._rom_mode:
             self._rom_max["flex"]  = max(self._rom_max["flex"],  abs(flex))
             self._rom_max["abd"]   = max(self._rom_max["abd"],   abs(abd))
             self._rom_max["rot"]   = max(self._rom_max["rot"],   abs(rot))
             self._rom_max["elbow"] = max(self._rom_max["elbow"], abs(elbow))
 
-        live = {n: self._filters[n].update(q_raw[n]) * MOUNT[n].inv()
+        live = {n: self._filters[n].update(q_raw[n]) * mount[n].inv()
                 for n in ["chest","arm","wrist"]}
-        ref  = {n: to_anatomical(q_ref[n], n) for n in ["chest","arm","wrist"]}
+        ref  = {n: to_anatomical(q_ref[n], n, mount) for n in ["chest","arm","wrist"]}
         corr = {n: ref[n].inv() * live[n] for n in ["chest","arm","wrist"]}
 
         shoulder_rot = corr["chest"].inv() * corr["arm"]
@@ -508,6 +558,13 @@ class RenderWidget(QWidget):
 
         upper_anat = shoulder_rot.apply(DOWN_NP) * UPPER_ARM_LEN
         fore_anat  = (shoulder_rot * elbow_rot).apply(DOWN_NP) * FOREARM_LEN
+
+        # Left arm mount mirrors the X (FORWARD) axis — negate it before
+        # applying WORLD_ROT so the rendered arm moves in the correct direction.
+        if side == "left":
+            upper_anat = upper_anat * np.array([-1., 1., 1.])
+            fore_anat  = fore_anat  * np.array([-1., 1., 1.])
+
         upper_disp = WORLD_ROT.apply(upper_anat)
         fore_disp  = WORLD_ROT.apply(fore_anat)
 

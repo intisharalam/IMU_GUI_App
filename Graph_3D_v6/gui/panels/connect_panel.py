@@ -389,7 +389,7 @@ class ConnectPanel(QWidget):
             }}
             QProgressBar::chunk {{
                 background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 {RED}, stop:1 {GREEN5});
+                    stop:1 {CYAN}, stop:0.5 {GREEN5}, stop:0 {AMBER});
                 border-radius: 2px;
             }}
         """)
