@@ -191,8 +191,9 @@ class BLEManager:
 
         def handler(_, raw: bytearray):
             # --- 16-byte binary quaternion packet ---
-            if len(raw) == 16:
+            if len(raw) == 20:
                 w, x, y, z = struct.unpack_from("<ffff", raw)
+                # timestamp available at raw[16:20] if needed
                 t = time.monotonic()
                 with self._state.lock:
                     self._state.slots[slot_name].update_quaternion(w, x, y, z, t)
