@@ -78,7 +78,7 @@ C_FOREARM    = (0.38, 0.22, 0.82, 1.0)   # rich violet
 C_SHOULDER   = (0.95, 0.70, 0.10, 1.0)   # warm amber
 C_ELBOW      = (0.08, 0.75, 0.48, 1.0)   # teal green
 C_WRIST      = (0.92, 0.25, 0.25, 1.0)   # coral red
-C_PHANTOM    = (0.62, 0.65, 0.70, 0.60)  # blue-grey, more opaque
+C_PHANTOM    = (0.62, 0.65, 0.70, 0.20)  # blue-grey, more opaque
 BG_COLOR     = '#ffffff'                  # ← string form, always works
 
 # ── Anatomical plane visualisation ────────────────────────────────────────────
@@ -87,9 +87,9 @@ C_PLANE_SAGITTAL   = (0.20, 0.60, 1.00)   # blue  — sagittal  (flexion / exten
 C_PLANE_FRONTAL    = (0.10, 0.80, 0.40)   # green — frontal   (abduction / adduction)
 C_PLANE_TRANSVERSE = (0.90, 0.55, 0.10)   # amber — transverse (rotation)
 
-PLANE_ALPHA_HI  = 0.28   # dominant plane alpha
-PLANE_ALPHA_LO  = 0.06   # non-dominant plane alpha
-PLANE_SIZE      = 0.55   # half-extent of each plane square (metres)
+PLANE_ALPHA_HI  = 0.5   # dominant plane alpha
+PLANE_ALPHA_LO  = 0.00   # non-dominant plane alpha
+PLANE_SIZE      = 0.1   # half-extent of each plane square (metres)
 
 DOWN_NP    = np.array([0., -1., 0.])
 IDENTITY_Q = (1., 0., 0., 0.)

@@ -1,5 +1,5 @@
 """
-main.py — ShoulderSense v5
+main.py — ShoulderSense v7
 --------------------------
 Entry point. Run with:
     python main.py

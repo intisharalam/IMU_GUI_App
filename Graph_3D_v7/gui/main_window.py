@@ -136,6 +136,7 @@ class MainWindow(QMainWindow):
         self._repdet   = RepDetector()
         self._last_haptic_t       = 0.0
         self._last_deviation_t    = 0.0   # separate cooldown for deviation haptics
+        self._last_trunk_t        = 0.0   # separate cooldown for trunk-lean haptics
         self._hold_drop_since     = None  # hysteresis timer for hold dropout
         self._recording      = False
         self._active_ex: ExerciseDef | None = None   # set at session start
@@ -218,7 +219,7 @@ class MainWindow(QMainWindow):
 
         lay.addStretch()
 
-        ver = QLabel("v5.0")
+        ver = QLabel("v7.0")
         ver.setAlignment(Qt.AlignCenter)
         ver.setFixedHeight(28)
         ver.setStyleSheet(
@@ -393,12 +394,37 @@ class MainWindow(QMainWindow):
                     abs(abd) >= rom_goal_frac * rom_abd):
                 self._trigger_haptic(now, "ROM limit reached", CMD_HAPTIC_ROM)
 
+            # ── Trunk lean haptic ─────────────────────────────────────────────
+            # Checked BEFORE plane deviation and on its own cooldown, bypassing
+            # the shared _trigger_haptic() 1s gate. Trunk lean and plane
+            # deviation are frequently true on the same frame (leaning to
+            # compensate also throws off the plane), and previously both
+            # routed through one global cooldown — whichever fired first
+            # (always deviation, since it was checked first) silently starved
+            # the other for the rest of that 1s window. Trunk lean is the more
+            # actionable correction, so it now gets priority and its own timer.
+            trunk_fired = False
+            if hap_trunk and ex.check_trunk_lean and trunk_lean > trunk_limit:
+                if now - self._last_trunk_t > 3.0:
+                    self._last_trunk_t = now
+                    trunk_fired = True
+                    self._repdet.notify_haptic(now)
+                    self._ble.send_haptic_all(CMD_HAPTIC_DEVIATION)
+                    with self._state.lock:
+                        self._state.haptic_log.append(
+                            (now, f"Trunk lean {trunk_lean:.0f}° — stand straight"))
+                        if len(self._state.haptic_log) > 30:
+                            self._state.haptic_log.pop(0)
+
             # ── Form deviation haptic (from ExerciseDef, not string matching) ─
             # Only fires when the arm is back near neutral (elevation < 25°) so
             # it does not interrupt a rep mid-way and trigger the haptic lockout.
             # plane_elev: 0° = pure abduction (frontal), 90° = pure flexion (sagittal).
+            # Skipped this frame if trunk lean already fired — avoids stacking
+            # two buzzes back-to-back for what is usually the same root cause.
             elevation_deg = max(abs(flex), abs(abd))
-            if hap_dev and elevation_deg < 25 and ex.expected_plane is not None:
+            if (not trunk_fired and hap_dev and elevation_deg < 25
+                    and ex.expected_plane is not None):
                 deviation = False
                 reason    = ""
                 if ex.expected_plane == "sagittal" and plane < 30:
@@ -410,10 +436,6 @@ class MainWindow(QMainWindow):
                 if deviation and now - self._last_deviation_t > 3.0:
                     self._last_deviation_t = now
                     self._trigger_haptic(now, reason, CMD_HAPTIC_DEVIATION)
-
-            # ── Trunk lean haptic ─────────────────────────────────────────────
-            if hap_trunk and ex.check_trunk_lean and trunk_lean > trunk_limit:
-                self._trigger_haptic(now, f"Trunk lean {trunk_lean:.0f}° — stand straight", CMD_HAPTIC_DEVIATION)
 
         # CSV recording
         if self._recording and active:
